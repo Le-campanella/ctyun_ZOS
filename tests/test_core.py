@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from uuid import uuid4
 
@@ -82,6 +83,7 @@ def test_database_schema_activation_and_revision_conflict(database: Database, se
     with database.connect() as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
 
 
 def test_task_queries_are_stable_and_filterable(database: Database, settings):
@@ -135,6 +137,59 @@ def test_event_logger_redacts_secrets_and_persists_notify(database: Database, ca
     assert len(rows) == 1
     assert rows[0]["details"] == {"secret_key": "[REDACTED]", "safe": "yes"}
     assert "visible-no" not in capsys.readouterr().out
+
+
+def test_summary_percentile_log_pagination_and_retention(database: Database):
+    config = database.activate_storage(storage_record(b"ciphertext"), 0)
+    now = datetime.now(UTC)
+    for index, duration in enumerate((100, 200, 300, 400, 500)):
+        task = task_record(
+            config["id"],
+            created_at=(now - timedelta(minutes=index)).isoformat(),
+            status="failed" if index == 4 else "succeeded",
+        )
+        task["size_bytes"] = 10
+        task["duration_ms"] = duration
+        task["finished_at"] = task["created_at"]
+        database.create_task(task)
+    summary = database.summary(
+        (now - timedelta(hours=1)).isoformat(), (now + timedelta(hours=1)).isoformat()
+    )
+    assert summary == {
+        "attempt_count": 5,
+        "success_count": 4,
+        "failure_count": 1,
+        "uploading_count": 0,
+        "unknown_count": 0,
+        "success_rate": 0.8,
+        "successful_upload_bytes": 40,
+        "average_duration_ms": 300,
+        "p95_duration_ms": 500,
+    }
+
+    for index in range(5):
+        database.write_log(
+            {
+                "created_at": (now + timedelta(seconds=index)).isoformat(),
+                "level_no": NOTIFY,
+                "level_name": "NOTIFY",
+                "event": "test",
+                "message": str(index),
+                "request_id": "keep" if index % 2 else "other",
+            }
+        )
+    first = database.list_logs(min_level=NOTIFY, limit=2)
+    second = database.list_logs(
+        min_level=NOTIFY, limit=2, before_id=first[-1]["id"]
+    )
+    assert not {item["id"] for item in first} & {item["id"] for item in second}
+    assert len(
+        database.list_logs(
+            min_level=NOTIFY, limit=10, filters={"request_id": "keep"}
+        )
+    ) == 2
+    database.maintain(task_retention_days=180, log_retention_days=30, log_max_rows=3)
+    assert len(database.list_logs(min_level=NOTIFY, limit=10)) == 3
 
 
 class FakeS3:

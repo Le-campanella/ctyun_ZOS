@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from threading import Event
 from typing import Any, BinaryIO
 from uuid import uuid4
 
@@ -21,6 +24,8 @@ class FakeProvider(StorageProvider):
     schema_version = 1
     instances: list["FakeProvider"] = []
     objects: dict[str, bytes] = {}
+    upload_started = Event()
+    upload_release = Event()
 
     def __init__(self, config, credentials, _settings):
         self.config, self.credentials = self.validate(config, credentials)
@@ -53,6 +58,11 @@ class FakeProvider(StorageProvider):
     def upload_file(
         self, fileobj: BinaryIO, object_key: str, content_type: str
     ) -> None:
+        if self.config.get("block_upload"):
+            self.__class__.upload_started.set()
+            self.__class__.upload_release.wait(3)
+        if self.config.get("uncertain_upload"):
+            raise ProviderError("STORAGE_TIMEOUT", "timeout", uncertain=True)
         if self.fail_upload:
             raise ProviderError("UPLOAD_FAILED", "failed")
         self.__class__.objects[object_key] = fileobj.read()
@@ -72,6 +82,8 @@ class FakeProvider(StorageProvider):
 def registry():
     FakeProvider.instances.clear()
     FakeProvider.objects.clear()
+    FakeProvider.upload_started.clear()
+    FakeProvider.upload_release.clear()
     registry = ProviderRegistry()
     registry.register(FakeProvider)
     return registry
@@ -92,6 +104,7 @@ def storage_payload(
     credentials: bool = True,
     fail_upload: bool = False,
     fail_test: bool = False,
+    **config,
 ):
     payload = {
         "provider": "fake",
@@ -102,6 +115,7 @@ def storage_payload(
             "public_base_url": "https://files.example",
             "fail_upload": fail_upload,
             "fail_test": fail_test,
+            **config,
         },
     }
     if credentials:
@@ -283,6 +297,80 @@ def test_upload_provider_failure_is_persisted(client):
     assert task["public_url"] is None
 
 
+def test_uncertain_upload_is_recoverable_and_hides_url(client):
+    activate(client, uncertain_upload=True)
+    response = client.post("/v1/uploads", files={"file": ("a.bin", b"payload")})
+    assert response.status_code == 502
+    task = client.get(f"/v1/upload-tasks/{response.json()['task_id']}").json()
+    assert task["status"] == "unknown"
+    assert task["error_code"] == "STORAGE_TIMEOUT"
+    assert task["public_url"] is None
+
+
+def test_capacity_rejects_second_upload_but_queries_stay_available(client):
+    activate(client, block_upload=True)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(
+            client.post, "/v1/uploads", files={"file": ("first.bin", b"one")}
+        )
+        assert FakeProvider.upload_started.wait(2)
+        second = client.post("/v1/uploads", files={"file": ("second.bin", b"two")})
+        health = client.get("/healthz")
+        FakeProvider.upload_release.set()
+        assert first.result(timeout=3).status_code == 201
+    assert second.status_code == 503
+    assert second.json()["error"]["code"] == "UPLOAD_CAPACITY_EXCEEDED"
+    assert second.headers["Retry-After"] == "5"
+    assert health.status_code == 200
+
+
+def test_filename_content_type_and_multipart_edges(client):
+    activate(client)
+    response = client.post(
+        "/v1/uploads",
+        files={"file": ("../<script>alert(1)</script>.TOO_LONG_EXT", b"x", "")},
+    )
+    assert response.status_code == 201
+    assert response.json()["key"].count(".") == 0
+    task = client.get(f"/v1/upload-tasks/{response.json()['task_id']}").json()
+    assert task["filename"] == "script>.TOO_LONG_EXT"
+    assert task["content_type"] == "application/octet-stream"
+    assert "<script>" not in client.get("/dashboard").text
+
+    missing = client.post("/v1/uploads", files={"other": ("a", b"x")})
+    malformed = client.post(
+        "/v1/uploads",
+        content=b"not multipart",
+        headers={"Content-Type": "multipart/form-data; boundary=broken"},
+    )
+    assert missing.json()["error"]["code"] == "FILE_REQUIRED"
+    assert malformed.status_code == 400
+
+
+def test_settings_reject_cross_origin_and_endpoint_change_without_new_keys(client):
+    activate(client)
+    cross_origin = client.post(
+        "/v1/settings/storage/test",
+        headers={
+            "X-Settings-Request": "true",
+            "Origin": "https://attacker.example",
+        },
+        json=storage_payload(revision=1, credentials=False),
+    )
+    assert cross_origin.status_code == 400
+
+    changed = storage_payload(revision=1, credentials=False)
+    changed["config"]["endpoint_url"] = "https://other.internal"
+    response = client.put(
+        "/v1/settings/storage",
+        headers={"X-Settings-Request": "true"},
+        json=changed,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "STORAGE_CREDENTIALS_REQUIRED"
+    assert client.get("/v1/settings/storage").json()["revision"] == 1
+
+
 def test_bad_headers_queries_and_request_body_limit(client):
     bad_request_id = client.get("/healthz", headers={"X-Request-ID": "x" * 129})
     assert bad_request_id.status_code == 400
@@ -296,6 +384,31 @@ def test_bad_headers_queries_and_request_body_limit(client):
         content=b"",
     )
     assert too_large.status_code == 413
+
+    activate(client)
+    no_content_length = client.post(
+        "/v1/uploads",
+        headers={
+            "Content-Type": "multipart/form-data; boundary=x",
+            "Content-Length": "10",
+        },
+        content=(
+            b"--x\r\nContent-Disposition: form-data; name=\"file\"; "
+            b"filename=\"a.bin\"\r\n\r\n" + b"x" * 2_100 + b"\r\n--x--\r\n"
+        ),
+    )
+    assert no_content_length.status_code == 413
+
+
+def test_ready_rejects_stale_storage_probe(client):
+    activate(client)
+    client.app.state.runtime.last_probe["last_checked_at"] = (
+        datetime.now(UTC) - timedelta(minutes=5)
+    ).isoformat()
+    response = client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["checks"]["storage"]["status"] == "degraded"
+    assert response.json()["checks"]["storage"]["error_code"] == "STORAGE_PROBE_STALE"
 
 
 def test_recovery_resolves_existing_and_missing_objects(settings, database, registry):

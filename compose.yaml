@@ -1,0 +1,21 @@
+services:
+  zos-upload:
+    build:
+      context: .
+      target: runtime
+    image: zos-upload-service:1.0.0
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    ports:
+      - "${LISTEN_IP:-127.0.0.1}:${LISTEN_PORT:-8000}:8000"
+    volumes:
+      - zos-database:/data/db
+      - zos-temporary:/data/tmp
+    stop_grace_period: 10m
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  zos-database:
+  zos-temporary:

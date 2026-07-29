@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
 from time import monotonic
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -71,7 +71,7 @@ def error_body(
 
 
 class RequestGuardMiddleware:
-    def __init__(self, app, settings: Settings):
+    def __init__(self, app, settings: Callable[[], Settings]):
         self.app = app
         self.settings = settings
         self.active_uploads = 0
@@ -103,7 +103,8 @@ class RequestGuardMiddleware:
         )
         acquired = False
         if is_upload:
-            if self.active_uploads >= self.settings.max_concurrent_uploads:
+            settings = self.settings()
+            if self.active_uploads >= settings.max_concurrent_uploads:
                 await self._response(
                     scope,
                     receive,
@@ -121,7 +122,9 @@ class RequestGuardMiddleware:
             content_length = headers.get(b"content-length")
             if content_length:
                 try:
-                    too_large = int(content_length) > self.settings.max_request_body_bytes
+                    too_large = (
+                        int(content_length) > settings.max_request_body_bytes
+                    )
                 except ValueError:
                     too_large = True
                 if too_large:
@@ -145,7 +148,7 @@ class RequestGuardMiddleware:
             message = await receive()
             if is_upload and message["type"] == "http.request":
                 total += len(message.get("body", b""))
-                if total > self.settings.max_request_body_bytes:
+                if total > settings.max_request_body_bytes:
                     raise BodyTooLarge
             return message
 
@@ -327,14 +330,12 @@ def create_app(
     web_root = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=web_root / "templates")
     app.mount("/static", StaticFiles(directory=web_root / "static"), name="static")
-    if settings is not None:
-        app.add_middleware(RequestGuardMiddleware, settings=settings)
-    else:
-        # Environment settings are loaded at startup; deployment defaults guard early bodies.
-        guard_settings = Settings(
-            encryption_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
-        )
-        app.add_middleware(RequestGuardMiddleware, settings=guard_settings)
+    guard_settings = Settings(
+        encryption_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    app.add_middleware(
+        RequestGuardMiddleware, settings=lambda: resolved or guard_settings
+    )
 
     @app.exception_handler(APIError)
     async def api_error(request: Request, exc: APIError):
@@ -729,6 +730,38 @@ def create_app(
             microsecond=0,
             hour=0 if interval == "day" else cursor.hour,
         )
+        buckets: dict[datetime, dict[str, int]] = {}
+        for task in tasks:
+            created = _parse_time(task["created_at"], "created_at")
+            assert created
+            local_created = created.astimezone(timezone)
+            bucket = local_created.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+                hour=0 if interval == "day" else local_created.hour,
+            )
+            totals = buckets.setdefault(
+                bucket,
+                {
+                    "attempt_count": 0,
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "uploading_count": 0,
+                    "unknown_count": 0,
+                    "successful_upload_bytes": 0,
+                },
+            )
+            totals["attempt_count"] += 1
+            key = {
+                "succeeded": "success_count",
+                "failed": "failure_count",
+                "uploading": "uploading_count",
+                "unknown": "unknown_count",
+            }[task["status"]]
+            totals[key] += 1
+            if task["status"] == "succeeded":
+                totals["successful_upload_bytes"] += task["size_bytes"] or 0
         points = []
         while cursor.astimezone(UTC) < end_utc:
             next_cursor = cursor + (
@@ -737,27 +770,18 @@ def create_app(
             point = {
                 "start": _iso(cursor),
                 "end": _iso(next_cursor),
-                "attempt_count": 0,
-                "success_count": 0,
-                "failure_count": 0,
-                "uploading_count": 0,
-                "unknown_count": 0,
-                "successful_upload_bytes": 0,
+                **buckets.get(
+                    cursor,
+                    {
+                        "attempt_count": 0,
+                        "success_count": 0,
+                        "failure_count": 0,
+                        "uploading_count": 0,
+                        "unknown_count": 0,
+                        "successful_upload_bytes": 0,
+                    },
+                ),
             }
-            for task in tasks:
-                created = _parse_time(task["created_at"], "created_at")
-                assert created
-                if cursor <= created.astimezone(timezone) < next_cursor:
-                    point["attempt_count"] += 1
-                    key = {
-                        "succeeded": "success_count",
-                        "failed": "failure_count",
-                        "uploading": "uploading_count",
-                        "unknown": "unknown_count",
-                    }[task["status"]]
-                    point[key] += 1
-                    if task["status"] == "succeeded":
-                        point["successful_upload_bytes"] += task["size_bytes"] or 0
             points.append(point)
             cursor = next_cursor
         return {

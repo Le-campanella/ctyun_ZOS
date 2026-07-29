@@ -362,6 +362,29 @@ class Runtime:
         except OSError:
             free, writable = 0, False
         temp_ok = writable and free >= self.settings.temp_min_free_bytes
+        storage = dict(self.last_probe)
+        last_checked = storage.get("last_checked_at")
+        try:
+            age_seconds = max(
+                0,
+                round(
+                    (
+                        datetime.now(UTC)
+                        - datetime.fromisoformat(last_checked.replace("Z", "+00:00"))
+                    ).total_seconds()
+                ),
+            )
+        except (AttributeError, TypeError, ValueError):
+            age_seconds = None
+        storage["age_seconds"] = age_seconds
+        probe_ok = (
+            storage["status"] == "ok"
+            and age_seconds is not None
+            and age_seconds <= self.settings.storage_probe_max_age_seconds
+        )
+        if storage["status"] == "ok" and not probe_ok:
+            storage["status"] = "degraded"
+            storage["error_code"] = "STORAGE_PROBE_STALE"
         checks = {
             "config": {
                 "status": "ok" if snapshot else "error",
@@ -384,7 +407,7 @@ class Runtime:
                 "completed": self.recovery_complete,
                 "pending_tasks": len(self.database.pending_tasks()),
             },
-            "storage": self.last_probe,
+            "storage": storage,
         }
         ready = (
             snapshot is not None
@@ -392,7 +415,7 @@ class Runtime:
             and temp_ok
             and self.schema_ready
             and self.recovery_complete
-            and self.last_probe["status"] == "ok"
+            and probe_ok
         )
         code = "STORAGE_NOT_CONFIGURED" if snapshot is None else "NOT_READY"
         return ready, checks, code
