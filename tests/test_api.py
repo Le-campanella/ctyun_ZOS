@@ -131,6 +131,25 @@ def test_unconfigured_service_still_serves_health_settings_and_dashboard(client)
     assert upload.json()["error"]["code"] == "STORAGE_NOT_CONFIGURED"
 
 
+def test_dashboard_is_local_static_and_never_embeds_credentials(client):
+    activate(client)
+    dashboard = client.get("/dashboard")
+    settings = client.get("/dashboard/settings")
+    dashboard_js = client.get("/static/dashboard.js")
+    settings_js = client.get("/static/settings.js")
+    chart = client.get("/static/chart.umd.min.js")
+
+    assert dashboard.status_code == settings.status_code == 200
+    assert dashboard_js.status_code == settings_js.status_code == chart.status_code == 200
+    assert 'src="/static/chart.umd.min.js"' in dashboard.text
+    assert "https://" not in dashboard.text
+    assert 'type="password"' in settings.text
+    assert "test-ak" not in settings.text and "test-sk" not in settings.text
+    assert "innerHTML" not in dashboard_js.text
+    assert "innerHTML" not in settings_js.text
+    assert "localStorage" not in settings_js.text
+
+
 def test_settings_activation_masks_credentials_and_preserves_them(client, database):
     assert client.get("/v1/settings/storage/providers").json()["items"][0]["id"] == "fake"
     result = activate(client).json()

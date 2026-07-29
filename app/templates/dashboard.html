@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZOS 上传服务 · 运行监控</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/chart.umd.min.js"></script>
+  <script defer src="/static/dashboard.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/dashboard"><span class="brand-mark">Z</span><span>ZOS Upload</span></a>
+    <nav aria-label="主导航">
+      <a class="active" href="/dashboard">运行监控</a>
+      <a href="/dashboard/settings">存储设置</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">INTERNAL FILE GATEWAY</p>
+        <h1>上传服务运行监控</h1>
+        <p>任务状态、上传流量和关键运行事件集中在一个页面。</p>
+      </div>
+      <div class="hero-actions">
+        <span id="updated-at" class="muted">等待首次刷新</span>
+        <button id="refresh" class="button secondary" type="button">立即刷新</button>
+      </div>
+    </section>
+
+    <div id="page-error" class="notice error hidden" role="alert"></div>
+
+    <section aria-labelledby="service-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">HEALTH</p><h2 id="service-title">服务状态</h2></div>
+        <span id="service-badge" class="badge neutral">检查中</span>
+      </div>
+      <div id="health-grid" class="health-grid" aria-live="polite">
+        <article class="health-item"><span>进程</span><strong id="health-process">—</strong></article>
+        <article class="health-item"><span>SQLite</span><strong id="health-database">—</strong></article>
+        <article class="health-item"><span>临时目录</span><strong id="health-temp">—</strong></article>
+        <article class="health-item"><span>存储连接</span><strong id="health-storage">—</strong></article>
+        <article class="health-item"><span>Provider</span><strong id="health-provider">—</strong></article>
+        <article class="health-item"><span>配置版本</span><strong id="health-revision">—</strong></article>
+      </div>
+    </section>
+
+    <section aria-labelledby="overview-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">OVERVIEW</p><h2 id="overview-title">上传概览</h2></div>
+        <div class="range-tabs" aria-label="统计范围">
+          <button class="range active" type="button" data-hours="24">24 小时</button>
+          <button class="range" type="button" data-hours="168">7 天</button>
+          <button class="range" type="button" data-hours="720">30 天</button>
+        </div>
+      </div>
+      <div class="metric-grid">
+        <article class="metric primary"><span>任务总数</span><strong id="metric-total">—</strong><small id="metric-success-rate">成功率 —</small></article>
+        <article class="metric success"><span>上传成功</span><strong id="metric-success">—</strong><small id="metric-bytes">—</small></article>
+        <article class="metric danger"><span>上传失败</span><strong id="metric-failed">—</strong><small>需要关注的任务</small></article>
+        <article class="metric warning"><span>处理中 / 待确认</span><strong id="metric-pending">—</strong><small id="metric-pending-detail">—</small></article>
+        <article class="metric"><span>平均耗时</span><strong id="metric-average">—</strong><small id="metric-p95">P95 —</small></article>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="traffic-title">
+      <div class="section-heading compact">
+        <div><p class="eyebrow">TRAFFIC</p><h2 id="traffic-title">上传流量</h2></div>
+        <span class="muted">成功字节数 / 任务数</span>
+      </div>
+      <div class="chart-wrap"><canvas id="traffic-chart" aria-label="上传流量图"></canvas></div>
+    </section>
+
+    <section class="panel" aria-labelledby="tasks-title">
+      <div class="section-heading compact">
+        <div><p class="eyebrow">RECENT TASKS</p><h2 id="tasks-title">近期上传任务</h2></div>
+        <a class="text-link" href="/v1/upload-tasks?limit=50" target="_blank" rel="noopener">查看 JSON</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>文件</th><th>状态</th><th>大小</th><th>类型</th><th>Provider / Rev</th><th>耗时</th><th>创建时间</th><th>结果</th></tr></thead>
+          <tbody id="task-rows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="logs-title">
+      <div class="section-heading compact">
+        <div><p class="eyebrow">EVENT STREAM</p><h2 id="logs-title">运行日志</h2></div>
+        <label class="inline-field">最低级别
+          <select id="log-level"><option>NOTIFY</option><option>WARNING</option><option>ERROR</option><option>CRITICAL</option></select>
+        </label>
+      </div>
+      <div id="log-list" class="log-list" aria-live="polite"><p class="empty">正在加载…</p></div>
+    </section>
+  </main>
+
+  <footer>局域网内部服务 · 所有时间按浏览器本地时区显示</footer>
+</body>
+</html>

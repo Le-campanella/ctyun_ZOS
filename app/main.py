@@ -5,7 +5,7 @@ import re
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from math import ceil
+from pathlib import Path
 from tempfile import SpooledTemporaryFile
 from time import monotonic
 from typing import Any
@@ -16,7 +16,9 @@ from zoneinfo import ZoneInfo
 import anyio
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
 
 from .config import Settings
@@ -322,6 +324,9 @@ def create_app(
             await runtime.stop()
 
     app = FastAPI(title="ZOS Upload Service", version="1.0.0", lifespan=lifespan)
+    web_root = Path(__file__).resolve().parent
+    templates = Jinja2Templates(directory=web_root / "templates")
+    app.mount("/static", StaticFiles(directory=web_root / "static"), name="static")
     if settings is not None:
         app.add_middleware(RequestGuardMiddleware, settings=settings)
     else:
@@ -821,12 +826,14 @@ def create_app(
         }
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard_placeholder():
-        return HTMLResponse("<h1>ZOS Upload Service</h1><p>Dashboard loading…</p>")
+    async def dashboard_page(request: Request):
+        return templates.TemplateResponse(request, "dashboard.html")
 
     @app.get("/dashboard/settings", response_class=HTMLResponse)
-    async def settings_placeholder():
-        return HTMLResponse("<h1>ZOS Storage Settings</h1><p>Settings loading…</p>")
+    async def settings_page(request: Request):
+        response = templates.TemplateResponse(request, "settings.html")
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     return app
 

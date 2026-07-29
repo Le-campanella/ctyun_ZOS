@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZOS 上传服务 · 存储设置</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/settings.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/dashboard"><span class="brand-mark">Z</span><span>ZOS Upload</span></a>
+    <nav aria-label="主导航">
+      <a href="/dashboard">运行监控</a>
+      <a class="active" href="/dashboard/settings">存储设置</a>
+    </nav>
+  </header>
+
+  <main class="settings-main">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">STORAGE CONTROL</p>
+        <h1>天翼云 ZOS 设置</h1>
+        <p>测试候选配置，确认连通后创建并激活新的不可变版本。</p>
+      </div>
+      <div class="revision-card"><span>当前 revision</span><strong id="revision">0</strong><small id="configured-state">尚未配置</small></div>
+    </section>
+
+    <div id="message" class="notice hidden" role="status" aria-live="polite"></div>
+
+    <form id="storage-form" class="settings-grid" autocomplete="off">
+      <section class="panel form-panel">
+        <div class="section-heading compact"><div><p class="eyebrow">DESTINATION</p><h2>目标存储</h2></div></div>
+        <div class="form-grid">
+          <label>Provider
+            <select id="provider" disabled><option value="ctyun_zos">天翼云对象存储 ZOS</option></select>
+          </label>
+          <label>SDK Endpoint
+            <input id="endpoint-url" type="url" required placeholder="https://jiangsu-10.zos.ctyun.cn" spellcheck="false">
+            <small>用于 SDK 上传和连接测试的 Endpoint。</small>
+          </label>
+          <label>Bucket
+            <input id="bucket" required minlength="3" maxlength="63" placeholder="example-bucket" spellcheck="false">
+          </label>
+          <label>公网访问根地址
+            <input id="public-base-url" type="url" required placeholder="https://example-bucket.jiangsu-10.zos.ctyun.cn" spellcheck="false">
+            <small id="url-suggestion">上传成功后用它拼接对象 Key。</small>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel form-panel">
+        <div class="section-heading compact"><div><p class="eyebrow">CREDENTIALS</p><h2>访问凭证</h2></div><span id="credential-state" class="badge neutral">未配置</span></div>
+        <p class="muted">更新相同 Endpoint 时可留空以沿用现有凭证；页面永远不会回填密钥。</p>
+        <div class="form-grid">
+          <label>Access Key <span id="access-key-masked" class="field-hint"></span>
+            <input id="access-key" type="password" autocomplete="new-password" spellcheck="false">
+          </label>
+          <label>Secret Key
+            <input id="secret-key" type="password" autocomplete="new-password" spellcheck="false">
+          </label>
+        </div>
+      </section>
+
+      <section class="panel form-panel">
+        <div class="section-heading compact"><div><p class="eyebrow">CLIENT</p><h2>连接参数</h2></div></div>
+        <div class="form-grid three">
+          <label>连接超时（秒）<input id="connect-timeout" type="number" min="1" max="60" value="5" required></label>
+          <label>读取超时（秒）<input id="read-timeout" type="number" min="1" max="3600" value="300" required></label>
+          <label>重试次数<input id="max-attempts" type="number" min="0" max="5" value="2" required></label>
+          <label class="check"><input id="verify-tls" type="checkbox" checked><span>校验 HTTPS 证书</span></label>
+          <label class="check"><input id="enable-metrics" type="checkbox"><span>启用 Bucket 指标</span></label>
+        </div>
+      </section>
+
+      <section class="panel action-panel">
+        <div>
+          <strong>最近连接测试</strong>
+          <p id="last-test" class="muted">尚无测试记录</p>
+        </div>
+        <div class="actions">
+          <button id="test-button" class="button secondary" type="button">测试连接</button>
+          <button id="save-button" class="button" type="submit">保存并激活</button>
+        </div>
+      </section>
+    </form>
+
+    <aside class="notice warning">
+      此页面无登录认证。只应绑定到可信局域网地址，并在正式环境使用内网 HTTPS。
+    </aside>
+  </main>
+  <footer>密钥只在本次请求中使用，提交后立即从输入框清除。</footer>
+</body>
+</html>
