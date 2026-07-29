@@ -115,6 +115,7 @@ Python 3.11 同时满足常规运行环境和当前 ZOS 官方 Python SDK 的版
 - 原始文件名只用于记录和展示，不直接进入对象 Key。
 - 原始文件名最大保存 255 个 Unicode 字符，超出部分截断。
 - Content-Type 缺失或无效时使用 `application/octet-stream`。
+- 上传对象固定使用 canned ACL `public-read`；调用方不能覆盖。
 - 对象目录日期按 `Asia/Shanghai` 计算。
 - 安全扩展名取原始文件名最后一个后缀，转为小写，仅保留 `a-z`、`0-9`，长度限制为 1 至 10 个字符。
 - 无安全扩展名时对象名只使用任务 UUID。
@@ -760,7 +761,8 @@ enable_bucket_metrics
 - active revision 固定的 Bucket。
 - 生成后的对象 Key。
 - 文件 Content-Type。
-- 私有或 Bucket 既定对象权限；调用方无权覆盖。
+- canned ACL `public-read`；调用方无权覆盖。
+- botocore 请求与响应 checksum 策略固定为 `when_required`，兼容 ZOS 对 `x-amz-content-sha256` 的校验。
 
 ### 14.4 超时、重试与连接池
 
@@ -947,7 +949,7 @@ enable_bucket_metrics
 - Provider、`provider_schema_version` 或 `endpoint_url` 发生变化时必须同时提交新的 AK 和 SK。
 - 每次保存都创建新 revision，不原地修改历史记录。
 - 保存失败或连接测试失败时，旧 active revision 保持不变。
-- ZOS 凭证至少具备执行 HeadBucket 检查、PutObject、multipart upload 和 HeadObject 所需的目标 Bucket 权限；启用 Bucket 指标时再增加对应统计读取权限。
+- ZOS 凭证至少具备执行 HeadBucket、PutObject、设置 `public-read` 对象 ACL、multipart upload 和 HeadObject 所需的目标 Bucket 权限；启用 Bucket 指标时再增加对应统计读取权限。
 - 优先使用专用 IAM 用户或服务账号的 AK/SK，并将权限范围限制在目标 Bucket；Dashboard 不管理 IAM、Bucket ACL 或 Bucket Policy。
 
 ## 17. 保留与维护

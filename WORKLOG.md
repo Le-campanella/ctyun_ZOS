@@ -28,9 +28,11 @@
 - 2026-07-29：完成非 root 生产镜像、容器健康检查、Compose 持久卷、局域网绑定示例和中文运行说明。
 - 2026-07-29：前端 JavaScript 语法、Compose 配置与 Git diff 校验通过。
 - 2026-07-29：生产容器 smoke test 通过：`/healthz`、两个 Dashboard 页面正常；未配置状态下 `/readyz` 按约定返回 503。
-- 2026-07-29：最终 27 个自动测试全部通过。
+- 2026-07-29：最终 28 个自动测试全部通过。
 - 2026-07-29：增加 `/v1/uploads/validate` 和 Dashboard 局域网接收测试区；复用正式接收限制，但不上传 ZOS、不创建任务。
 - 2026-07-29：接收测试区增加默认关闭的真实上传开关；开启后复用正式上传接口并显示其响应。
+- 2026-07-29：真实 ZOS 诊断确认 botocore 默认 checksum 导致 `XAmzContentSHA256Mismatch`；Provider 永久改为 `when_required`，上传对象固定使用 `public-read` ACL。
+- 2026-07-29：通过正式 `/v1/uploads` 上传 `k3_tech_report.pdf` 验证成功；任务状态为 `succeeded`，匿名公网 HEAD 返回 200，大小 `1795077` 且 Content-Type 为 `application/pdf`。
 
 ## 进行中
 
@@ -38,7 +40,7 @@
 
 ## 尚未完成
 
-- 使用真实 ZOS 执行端到端验收；需要可用的 Endpoint、Bucket、AK、SK 和公网访问域名。
+- 完成接近 200 MiB、multipart、重启恢复等剩余真实 ZOS 压力与故障验收；基础 PDF 上传和公网访问已经通过。
 - 在目标局域网部署内网 HTTPS 反向代理、网络访问控制、数据库备份和 Bucket 生命周期规则；这些属于部署环境工作。
 
 ## 下一步

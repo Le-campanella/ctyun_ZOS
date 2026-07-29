@@ -62,7 +62,7 @@ curl -fsS \
 }
 ```
 
-单文件最大 200 MiB，默认接受所有类型。公网 URL 只在上传成功时返回；服务不代理下载，也不管理文件生命周期或匿名访问策略。
+单文件最大 200 MiB，默认接受所有类型。正式上传固定设置 `public-read` 对象 ACL；公网 URL 只在上传成功时返回，服务不代理下载。
 
 ## 测试
 
@@ -88,5 +88,5 @@ docker run --rm zos-upload-service:test
 - 服务没有应用层认证，只允许绑定可信局域网 IP；不要把端口暴露到公网。
 - 设置请求会携带 AK/SK，正式环境应放在内网 HTTPS 反向代理后，且禁止代理日志记录请求体。
 - `zos-database` 保存 SQLite 和加密后的配置；`zos-temporary` 只保存请求期临时文件。数据库卷需要定期快照或在线备份。
-- Bucket 的公网读取、生命周期、未完成 multipart 清理、对象删除与权限策略均在 ZOS 侧管理。
+- 服务为上传对象请求 `public-read` canned ACL；Bucket Policy、账号权限、生命周期、未完成 multipart 清理和对象删除仍在 ZOS 侧管理。
 - 当前标准 S3 Client 覆盖 HeadBucket、上传、multipart 和 HeadObject。ZOS 扩展 Bucket 指标依赖兼容 SDK；关闭指标不会影响核心上传与本地 Dashboard。

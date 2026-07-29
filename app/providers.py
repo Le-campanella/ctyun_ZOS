@@ -139,6 +139,8 @@ class CtyunZosProvider(StorageProvider):
                 read_timeout=self.config["read_timeout_seconds"],
                 retries={"max_attempts": retries, "mode": "standard"},
                 max_pool_connections=pool_size,
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
             ),
         )
 
@@ -308,7 +310,7 @@ class CtyunZosProvider(StorageProvider):
                 fileobj,
                 self.bucket,
                 object_key,
-                ExtraArgs={"ContentType": content_type},
+                ExtraArgs={"ContentType": content_type, "ACL": "public-read"},
                 Config=self._transfer,
             )
         except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError) as exc:

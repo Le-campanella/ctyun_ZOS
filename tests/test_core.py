@@ -245,7 +245,7 @@ def test_zos_provider_validation_upload_url_and_head(settings):
     assert fake.uploaded[:3] == (
         "bucket-1",
         "2026/07/29/a b.pdf",
-        {"ContentType": "application/pdf"},
+        {"ContentType": "application/pdf", "ACL": "public-read"},
     )
     assert (
         provider.build_public_url("2026/07/29/a b.pdf")
@@ -253,6 +253,25 @@ def test_zos_provider_validation_upload_url_and_head(settings):
     )
     assert provider.head_object("2026/07/29/a b.pdf") == {"size_bytes": 5}
     assert provider.head_object("missing") is None
+
+
+def test_zos_client_uses_compatible_checksum_policy(settings, monkeypatch):
+    captured = {}
+
+    def create_client(*_args, **kwargs):
+        captured.update(kwargs)
+        return FakeS3()
+
+    monkeypatch.setattr("app.providers.boto3.client", create_client)
+    CtyunZosProvider(
+        valid_config(),
+        {"access_key": "ak", "secret_key": "sk"},
+        settings,
+    )
+
+    config = captured["config"]
+    assert config.request_checksum_calculation == "when_required"
+    assert config.response_checksum_validation == "when_required"
 
 
 @pytest.mark.parametrize(

@@ -141,6 +141,7 @@ Idempotency-Key: optional-idempotency-key
 - 接受所有文件类型。
 - 空文件返回 `FILE_EMPTY`。
 - 文件部分的 `Content-Type` 会写入当前 active Storage Provider；缺失或无效时使用 `application/octet-stream`。
+- 正式上传固定设置对象 canned ACL `public-read`；调用方不能修改。
 - 原始文件名最多保存 255 个 Unicode 字符，超出部分截断。
 - 原始文件名只用于任务记录和 Dashboard 展示。
 - 新任务使用请求开始时的 active storage config revision；设置切换不会改变已经创建的任务。
@@ -199,7 +200,7 @@ X-Request-ID: 82d1f9d8-...
 2. SQLite 任务状态已更新为 `succeeded`。
 3. `size_bytes`、`finished_at` 和 `duration_ms` 已完成持久化。
 
-调用方应直接保存和使用 `url`，并把它视为不透明字符串。URL 权限、有效期和实际公网可访问性由任务绑定的 Storage Provider 配置与 Bucket 设置决定。
+调用方应直接保存和使用 `url`，并把它视为不透明字符串。服务上传时请求 `public-read` 对象 ACL；Bucket Policy、账号权限或 ZOS 侧安全策略仍可能阻止匿名访问。
 
 ### 4.4 幂等重放成功
 
