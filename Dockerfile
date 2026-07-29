@@ -24,6 +24,8 @@ RUN useradd --create-home --uid 10001 app \
     && mkdir -p /data/tmp \
     && chown -R app:app /data
 
+ENV TMPDIR=/data/tmp
+
 USER app
 
 EXPOSE 8000

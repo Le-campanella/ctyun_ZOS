@@ -16,7 +16,7 @@ def settings(tmp_path: Path) -> Settings:
         database_path=tmp_path / "service.db",
         temp_dir=tmp_path / "tmp",
         max_upload_bytes=100,
-        max_request_body_bytes=200,
+        max_request_body_bytes=2_048,
         max_concurrent_uploads=1,
         temp_min_free_bytes=0,
         s3_multipart_threshold_bytes=5_242_880,

@@ -312,11 +312,19 @@ class Database:
         limit: int,
         before_id: int | None = None,
         filters: dict[str, Any] | None = None,
+        from_time: str | None = None,
+        to_time: str | None = None,
     ) -> list[dict[str, Any]]:
         where, values = ["level_no>=?"], [min_level]
         if before_id is not None:
             where.append("id<?")
             values.append(before_id)
+        if from_time:
+            where.append("created_at>=?")
+            values.append(from_time)
+        if to_time:
+            where.append("created_at<?")
+            values.append(to_time)
         for key, value in (filters or {}).items():
             if value is not None:
                 where.append(f"{key}=?")
@@ -337,6 +345,51 @@ class Database:
             item["details"] = json.loads(details_json) if details_json else None
             items.append(item)
         return items
+
+    def tasks_in_range(self, from_time: str, to_time: str) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT status, size_bytes, duration_ms, created_at
+                FROM upload_tasks
+                WHERE created_at>=? AND created_at<?
+                ORDER BY created_at
+                """,
+                (from_time, to_time),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def summary(self, from_time: str, to_time: str) -> dict[str, Any]:
+        tasks = self.tasks_in_range(from_time, to_time)
+        counts = {
+            status: sum(task["status"] == status for task in tasks)
+            for status in ("succeeded", "failed", "uploading", "unknown")
+        }
+        durations = sorted(
+            task["duration_ms"]
+            for task in tasks
+            if task["duration_ms"] is not None
+            and task["status"] in {"succeeded", "failed"}
+        )
+        completed = counts["succeeded"] + counts["failed"]
+        p95_index = max(0, (95 * len(durations) + 99) // 100 - 1)
+        return {
+            "attempt_count": len(tasks),
+            "success_count": counts["succeeded"],
+            "failure_count": counts["failed"],
+            "uploading_count": counts["uploading"],
+            "unknown_count": counts["unknown"],
+            "success_rate": counts["succeeded"] / completed if completed else None,
+            "successful_upload_bytes": sum(
+                task["size_bytes"] or 0
+                for task in tasks
+                if task["status"] == "succeeded"
+            ),
+            "average_duration_ms": round(sum(durations) / len(durations))
+            if durations
+            else None,
+            "p95_duration_ms": durations[p95_index] if durations else None,
+        }
 
     def check_writable(self) -> None:
         with self.transaction() as connection:
