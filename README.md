@@ -40,7 +40,7 @@ curl -fsS -F 'file=@./example.pdf' \
   http://<内网IP>:8000/v1/uploads/validate
 ```
 
-同一功能也可以在 Dashboard 的“局域网文件接收测试”区域操作。它会执行正式上传相同的 multipart、大小限制和临时文件读写，但不会创建任务记录。
+同一功能也可以在 Dashboard 的“局域网文件接收测试”区域操作。“真实上传到 ZOS”开关默认关闭，此时只执行 multipart、大小限制和临时文件读写；开启后会调用正式上传接口、创建任务并返回公网链接。
 
 真实上传：
 

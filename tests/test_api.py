@@ -163,7 +163,9 @@ def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     assert "innerHTML" not in settings_js.text
     assert "localStorage" not in settings_js.text
     assert 'id="receive-test-file"' in dashboard.text
+    assert 'id="receive-test-real-upload" type="checkbox" role="switch"' in dashboard.text
     assert "/v1/uploads/validate" in dashboard_js.text
+    assert 'real ? "/v1/uploads" : "/v1/uploads/validate"' in dashboard_js.text
 
 
 def test_receive_validation_works_unconfigured_without_task_or_storage(client):

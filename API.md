@@ -597,7 +597,7 @@ Content-Type: text/html; charset=utf-8
 - 页面不加载公网 CDN、远程字体或第三方脚本。
 - 文件名、日志消息和动态字段统一执行 HTML 转义。
 
-页面展示服务状态、active Provider 与 revision、上传概览、上传流量图、近期上传任务和 `NOTIFY` 及以上日志。
+页面展示局域网文件接收测试、服务状态、active Provider 与 revision、上传概览、上传流量图、近期上传任务和 `NOTIFY` 及以上日志。接收测试的“真实上传到 ZOS”开关默认关闭；开启后页面改为调用正式 `/v1/uploads`，因此会创建任务并返回对象 Key 与公网 URL。
 
 ### 8.2 存储设置页面
 

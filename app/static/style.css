@@ -141,6 +141,17 @@ h2 { margin: 3px 0 0; font-size: 1.25rem; }
   color: var(--text);
   cursor: pointer;
 }
+.upload-switch {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  align-items: center;
+  color: var(--text);
+  font-size: .86rem;
+  cursor: pointer;
+}
+.upload-switch input { width: 36px; height: 20px; grid-row: 1 / 3; accent-color: var(--yellow); }
+.upload-switch small { color: var(--muted); font-weight: 400; }
 .receive-test .button { justify-self: start; }
 .result-box textarea {
   width: 100%;

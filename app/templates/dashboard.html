@@ -35,13 +35,18 @@
     <section class="panel receive-test" aria-labelledby="receive-test-title">
       <div class="section-heading compact">
         <div><p class="eyebrow">LAN RECEIVE TEST</p><h2 id="receive-test-title">局域网文件接收测试</h2></div>
-        <span class="badge ok">不会上传 ZOS</span>
+        <span id="receive-test-mode" class="badge ok">仅接收，不上传</span>
       </div>
       <div class="receive-test-grid">
         <form id="receive-test-form">
-          <p class="muted">使用与正式上传相同的接收、大小限制和临时文件流程，不连接对象存储，也不创建任务记录。</p>
+          <p id="receive-test-help" class="muted">使用与正式上传相同的接收、大小限制和临时文件流程，不连接对象存储，也不创建任务记录。</p>
           <label class="file-picker">选择测试文件
             <input id="receive-test-file" name="file" type="file" required>
+          </label>
+          <label class="upload-switch">
+            <input id="receive-test-real-upload" type="checkbox" role="switch">
+            <span>真实上传到 ZOS</span>
+            <small>默认关闭；开启后会创建正式任务并返回公网链接。</small>
           </label>
           <button id="receive-test-button" class="button" type="submit">提交接收测试</button>
         </form>

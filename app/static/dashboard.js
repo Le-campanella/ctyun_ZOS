@@ -226,18 +226,30 @@
   }));
   $("refresh").addEventListener("click", () => refresh());
   $("log-level").addEventListener("change", () => refresh([loadLogs]));
+  $("receive-test-real-upload").addEventListener("change", (event) => {
+    const real = event.target.checked;
+    $("receive-test-mode").textContent = real ? "真实上传已开启" : "仅接收，不上传";
+    $("receive-test-mode").className = `badge ${real ? "warning" : "ok"}`;
+    $("receive-test-help").textContent = real
+      ? "文件将通过正式上传接口写入当前 ZOS，并创建任务记录、返回公网链接。"
+      : "使用与正式上传相同的接收、大小限制和临时文件流程，不连接对象存储，也不创建任务记录。";
+    $("receive-test-button").textContent = real ? "上传到 ZOS" : "提交接收测试";
+  });
   $("receive-test-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const file = $("receive-test-file").files[0];
     if (!file) return;
     const button = $("receive-test-button");
+    const toggle = $("receive-test-real-upload");
     const result = $("receive-test-result");
     button.disabled = true;
-    result.value = "正在接收并校验文件…";
+    toggle.disabled = true;
+    const real = toggle.checked;
+    result.value = real ? "正在上传到 ZOS…" : "正在接收并校验文件…";
     try {
       const form = new FormData();
       form.append("file", file);
-      const response = await fetch("/v1/uploads/validate", {
+      const response = await fetch(real ? "/v1/uploads" : "/v1/uploads/validate", {
         method: "POST",
         body: form,
         headers: { Accept: "application/json" },
@@ -248,6 +260,7 @@
       result.value = JSON.stringify({ error: { message: error.message } }, null, 2);
     } finally {
       button.disabled = false;
+      toggle.disabled = false;
     }
   });
   refresh();
