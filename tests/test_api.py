@@ -162,6 +162,38 @@ def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     assert "innerHTML" not in dashboard_js.text
     assert "innerHTML" not in settings_js.text
     assert "localStorage" not in settings_js.text
+    assert 'id="receive-test-file"' in dashboard.text
+    assert "/v1/uploads/validate" in dashboard_js.text
+
+
+def test_receive_validation_works_unconfigured_without_task_or_storage(client):
+    response = client.post(
+        "/v1/uploads/validate",
+        headers={"X-Request-ID": "lan-test-1"},
+        files={"file": ("../测试.pdf", b"lan-payload", "application/pdf")},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "received": True,
+        "uploaded_to_storage": False,
+        "recorded_as_task": False,
+        "filename": "测试.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 11,
+        "request_id": "lan-test-1",
+    }
+    assert client.get("/v1/upload-tasks").json()["items"] == []
+    assert FakeProvider.objects == {}
+
+    empty = client.post(
+        "/v1/uploads/validate", files={"file": ("empty.txt", b"")}
+    )
+    oversized = client.post(
+        "/v1/uploads/validate", files={"file": ("large.bin", b"x" * 101)}
+    )
+    assert empty.json()["error"]["code"] == "FILE_EMPTY"
+    assert oversized.status_code == 413
+    assert oversized.json()["error"]["code"] == "FILE_TOO_LARGE"
 
 
 def test_settings_activation_masks_credentials_and_preserves_them(client, database):

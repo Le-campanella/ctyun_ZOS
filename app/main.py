@@ -99,7 +99,9 @@ class RequestGuardMiddleware:
         scope.setdefault("state", {})["request_id"] = request_id
         scope["state"]["started_at"] = monotonic()
         is_upload = (
-            scope["method"] == "POST" and scope["path"].rstrip("/") == "/v1/uploads"
+            scope["method"] == "POST"
+            and scope["path"].rstrip("/")
+            in {"/v1/uploads", "/v1/uploads/validate"}
         )
         acquired = False
         if is_upload:
@@ -224,6 +226,29 @@ def _copy_upload(source, destination, chunk_size: int, maximum: int) -> int:
         destination.write(chunk)
     destination.seek(0)
     return size
+
+
+async def _upload_file(request: Request, runtime: Runtime) -> UploadFile:
+    if not request.headers.get("content-type", "").startswith(
+        "multipart/form-data"
+    ):
+        raise APIError(400, "BAD_REQUEST", "上传请求必须使用 multipart/form-data")
+    try:
+        form = await request.form(
+            max_files=2,
+            max_fields=10,
+            max_part_size=runtime.settings.max_upload_bytes + 1,
+        )
+    except BodyTooLarge:
+        raise
+    except Exception as exc:
+        raise APIError(400, "BAD_REQUEST", "multipart 请求格式错误") from exc
+    files = form.getlist("file")
+    if not files:
+        raise APIError(400, "FILE_REQUIRED", "缺少 file 字段")
+    if len(files) != 1 or not isinstance(files[0], UploadFile):
+        raise APIError(400, "BAD_REQUEST", "每次请求只能上传一个文件")
+    return files[0]
 
 
 def _parse_time(value: str | None, name: str) -> datetime | None:
@@ -435,6 +460,45 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.post("/v1/uploads/validate")
+    async def validate_upload(request: Request):
+        runtime: Runtime = request.app.state.runtime
+        source = await _upload_file(request, runtime)
+        filename = _filename(source.filename)
+        content_type = _content_type(source.content_type)
+        spool = SpooledTemporaryFile(
+            max_size=runtime.settings.upload_spool_threshold_bytes,
+            mode="w+b",
+            dir=runtime.settings.temp_dir,
+        )
+        try:
+            try:
+                size = await anyio.to_thread.run_sync(
+                    _copy_upload,
+                    source.file,
+                    spool,
+                    runtime.settings.upload_read_chunk_bytes,
+                    runtime.settings.max_upload_bytes,
+                )
+            except FileTooLarge as exc:
+                raise APIError(
+                    413, "FILE_TOO_LARGE", "文件不能超过 200 MiB"
+                ) from exc
+            if size == 0:
+                raise APIError(400, "FILE_EMPTY", "文件不能为空")
+            return {
+                "received": True,
+                "uploaded_to_storage": False,
+                "recorded_as_task": False,
+                "filename": filename,
+                "content_type": content_type,
+                "size_bytes": size,
+                "request_id": _request_id(request),
+            }
+        finally:
+            spool.close()
+            await source.close()
+
     @app.post("/v1/uploads")
     async def upload(request: Request):
         runtime: Runtime = request.app.state.runtime
@@ -471,26 +535,7 @@ def create_app(
                     "该幂等键已经绑定上传任务",
                     task_id=existing["id"],
                 )
-        if not request.headers.get("content-type", "").startswith(
-            "multipart/form-data"
-        ):
-            raise APIError(400, "BAD_REQUEST", "上传请求必须使用 multipart/form-data")
-        try:
-            form = await request.form(
-                max_files=2,
-                max_fields=10,
-                max_part_size=runtime.settings.max_upload_bytes + 1,
-            )
-        except BodyTooLarge:
-            raise
-        except Exception as exc:
-            raise APIError(400, "BAD_REQUEST", "multipart 请求格式错误") from exc
-        files = form.getlist("file")
-        if not files:
-            raise APIError(400, "FILE_REQUIRED", "缺少 file 字段")
-        if len(files) != 1 or not isinstance(files[0], UploadFile):
-            raise APIError(400, "BAD_REQUEST", "每次请求只能上传一个文件")
-        source = files[0]
+        source = await _upload_file(request, runtime)
         filename = _filename(source.filename)
         content_type = _content_type(source.content_type)
         task_id = str(uuid4())

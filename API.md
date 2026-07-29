@@ -18,6 +18,7 @@
 6. 提供上传统计、流量时间序列、`NOTIFY` 及以上日志和可选 Storage Provider 原生指标；第一版为 ZOS Bucket 指标。
 7. 提供同源、无登录的 Web Dashboard，其中监控区域只读，设置页面可以测试和激活存储配置。
 8. 提供 Provider preset、当前设置、连接测试和配置 revision API。
+9. 提供不会上传对象存储、不会创建任务记录的局域网文件接收测试。
 
 服务记录上传过程、任务结果、存储配置 revision、统计和运行日志。对象的下载、更新、删除、重命名、列表和 Bucket 权限管理由其他系统或对象存储配置负责。上传调用方 API 保持 Provider 无关。
 
@@ -269,6 +270,35 @@ HTTP/1.1 409 Conflict
   }
 }
 ```
+
+### 4.6 局域网文件接收测试
+
+用于验证调用方到本服务的网络、multipart 编码、文件大小限制和临时文件读写，不连接当前 Storage Provider，也不创建上传任务：
+
+```http
+POST /v1/uploads/validate HTTP/1.1
+Host: zos-upload-service:8000
+Content-Type: multipart/form-data; boundary=...
+X-Request-ID: optional-request-id
+```
+
+请求使用与正式上传相同的单个 `file` 字段、200 MiB 文件上限、请求体上限和并发容量。未配置 Storage Provider 时也可以调用。
+
+成功响应：
+
+```json
+{
+  "received": true,
+  "uploaded_to_storage": false,
+  "recorded_as_task": false,
+  "filename": "test.pdf",
+  "content_type": "application/pdf",
+  "size_bytes": 125678,
+  "request_id": "82d1f9d8-..."
+}
+```
+
+请求结束后立即关闭临时文件。该接口只能证明局域网文件接收链路正常，不能证明 ZOS 上传权限或公网 URL 可用。
 
 ## 5. 查询上传任务列表
 

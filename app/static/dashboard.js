@@ -226,6 +226,30 @@
   }));
   $("refresh").addEventListener("click", () => refresh());
   $("log-level").addEventListener("change", () => refresh([loadLogs]));
+  $("receive-test-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const file = $("receive-test-file").files[0];
+    if (!file) return;
+    const button = $("receive-test-button");
+    const result = $("receive-test-result");
+    button.disabled = true;
+    result.value = "正在接收并校验文件…";
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const response = await fetch("/v1/uploads/validate", {
+        method: "POST",
+        body: form,
+        headers: { Accept: "application/json" },
+      });
+      const body = await response.json();
+      result.value = JSON.stringify(body, null, 2);
+    } catch (error) {
+      result.value = JSON.stringify({ error: { message: error.message } }, null, 2);
+    } finally {
+      button.disabled = false;
+    }
+  });
   refresh();
   setInterval(() => refresh([loadLogs]), 10000);
   setInterval(() => refresh([loadTasks]), 15000);

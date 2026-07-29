@@ -33,6 +33,17 @@ docker compose ps
 
 ## 调用上传接口
 
+只验证局域网接收链路、不上传 ZOS：
+
+```bash
+curl -fsS -F 'file=@./example.pdf' \
+  http://<内网IP>:8000/v1/uploads/validate
+```
+
+同一功能也可以在 Dashboard 的“局域网文件接收测试”区域操作。它会执行正式上传相同的 multipart、大小限制和临时文件读写，但不会创建任务记录。
+
+真实上传：
+
 ```bash
 curl -fsS \
   -H 'X-Request-ID: caller-service-001' \

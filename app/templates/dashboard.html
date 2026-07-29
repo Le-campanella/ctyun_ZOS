@@ -32,6 +32,25 @@
 
     <div id="page-error" class="notice error hidden" role="alert"></div>
 
+    <section class="panel receive-test" aria-labelledby="receive-test-title">
+      <div class="section-heading compact">
+        <div><p class="eyebrow">LAN RECEIVE TEST</p><h2 id="receive-test-title">局域网文件接收测试</h2></div>
+        <span class="badge ok">不会上传 ZOS</span>
+      </div>
+      <div class="receive-test-grid">
+        <form id="receive-test-form">
+          <p class="muted">使用与正式上传相同的接收、大小限制和临时文件流程，不连接对象存储，也不创建任务记录。</p>
+          <label class="file-picker">选择测试文件
+            <input id="receive-test-file" name="file" type="file" required>
+          </label>
+          <button id="receive-test-button" class="button" type="submit">提交接收测试</button>
+        </form>
+        <label class="result-box">返回信息
+          <textarea id="receive-test-result" readonly spellcheck="false" aria-live="polite">请选择文件并提交。</textarea>
+        </label>
+      </div>
+    </section>
+
     <section aria-labelledby="service-title">
       <div class="section-heading">
         <div><p class="eyebrow">HEALTH</p><h2 id="service-title">服务状态</h2></div>
