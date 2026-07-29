@@ -1,0 +1,12 @@
+.git
+.pytest_cache
+.venv
+__pycache__
+*.py[cod]
+*.pdf
+*.zip
+*:Zone.Identifier
+legacy
+data
+htmlcov
+.coverage
