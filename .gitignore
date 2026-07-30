@@ -7,3 +7,9 @@ __pycache__/
 data/
 htmlcov/
 .coverage
+
+# Local upload samples and runtime databases
+assets/
+*.db
+*.db-shm
+*.db-wal
