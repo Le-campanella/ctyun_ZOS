@@ -75,6 +75,28 @@ docker run --rm zos-upload-service:test
 
 测试覆盖上传成功/失败/待确认、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite WAL 与 revision、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
 
+## 部署到局域网服务器
+
+默认通过 SSH 部署到 `liyang@192.168.1.150:~/services/ctyun_ZOS`。服务器需要安装 Docker
+和 Compose，并允许 `liyang` 直接使用 Docker。首次部署前授权本机部署密钥：
+
+```bash
+ssh-copy-id -i ~/.ssh/id_ed25519_ctyun_zos.pub liyang@192.168.1.150
+./deploy.sh
+```
+
+脚本只部署已提交代码，以当前 Git commit 标记并传输镜像，随后重建容器并检查
+`http://192.168.1.150:8000/healthz`。首次执行会在服务器生成 `.env` 后停止；填写
+`SETTINGS_ENCRYPTION_KEY` 和 `LISTEN_IP=192.168.1.150`，再执行一次即可。
+
+临时覆盖目标或健康检查地址：
+
+```bash
+DEPLOY_TARGET=user@host DEPLOY_HEALTH_URL=http://host:8000/healthz ./deploy.sh
+```
+
+部署不会覆盖服务器 `.env`，也不会删除 `ctyun_zos` 项目的数据库和临时文件卷。
+
 真实 ZOS 验收需要有效的 Endpoint、Bucket、AK/SK 和可公网访问的 Bucket 域名，至少检查：
 
 1. TXT、PDF、图片、超过 16 MiB 及接近 200 MiB 文件。

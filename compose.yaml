@@ -3,7 +3,7 @@ services:
     build:
       context: .
       target: runtime
-    image: zos-upload-service:1.0.0
+    image: "zos-upload-service:${IMAGE_TAG:-1.0.0}"
     restart: unless-stopped
     init: true
     env_file: .env
