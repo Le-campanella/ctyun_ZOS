@@ -35,10 +35,11 @@
 - 2026-07-29：通过正式 `/v1/uploads` 上传 `k3_tech_report.pdf` 验证成功；任务状态为 `succeeded`，匿名公网 HEAD 返回 200，大小 `1795077` 且 Content-Type 为 `application/pdf`。
 - 2026-07-30：增加面向 `liyang@192.168.1.150:~/services/ctyun_ZOS` 的 SSH 部署脚本；本地测试、按 Git commit 构建镜像、传输、Compose 重建和健康检查由单条命令完成。
 - 2026-07-30：Compose 镜像标签支持 `IMAGE_TAG`，服务器 `.env` 与持久卷不会被部署覆盖。
+- 2026-07-30：完成首次局域网服务器部署；版本 `f38067ee0934` 容器健康，Dashboard 返回 200，数据库与临时文件持久卷已创建。
 
 ## 进行中
 
-- 为目标服务器配置 SSH 公钥授权并执行首次部署。
+- 无。
 
 ## 尚未完成
 
