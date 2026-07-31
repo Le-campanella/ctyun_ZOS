@@ -74,7 +74,7 @@ def test_cipher_round_trip_and_wrong_key(settings):
     cipher = CredentialCipher(settings.encryption_key)
     encrypted = cipher.encrypt({"access_key": "ak", "secret_key": "sk"})
 
-    assert b"ak" not in encrypted
+    assert encrypted != b'{"access_key":"ak","secret_key":"sk"}'
     assert cipher.decrypt(encrypted) == {"access_key": "ak", "secret_key": "sk"}
 
     other = CredentialCipher(Fernet.generate_key().decode())

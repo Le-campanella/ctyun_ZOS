@@ -1,6 +1,9 @@
 *:Zone.Identifier
 .env
 .deploy.env
+.backup.env
+.backup.lock
+backup.log
 .pytest_cache/
 .venv/
 __pycache__/

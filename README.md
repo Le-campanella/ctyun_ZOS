@@ -163,10 +163,48 @@ ACCEPT_CONCURRENCY=4 \
 2026-07-31 已在真实 ZOS 上通过：1 MiB 单任务、4 个并发 20 MiB multipart、190 MiB
 近上限文件和显式 `default` 预设；每个对象均通过公网 HEAD，随后严格删除。
 
+## 私有异地备份
+
+备份不经过普通文件上传 API。它使用 SQLite Online Backup 创建一致性快照，把数据库和
+`SETTINGS_ENCRYPTION_KEY` 放入同一归档，再使用独立备份密码加密并以 `private` ACL
+上传到专用 ZOS Bucket。
+
+服务器首次配置：
+
+```bash
+cp .backup.env.example .backup.env
+chmod 600 .backup.env
+```
+
+在 `.backup.env` 中填写专用 AK/SK 和至少 32 字符的 `BACKUP_PASSPHRASE`。密码必须
+离线保存，不能只存在被备份的服务器或同一个 Bucket。
+
+手动创建备份并验证下载、解密、摘要和 SQLite 完整性：
+
+```bash
+./scripts/zos-backup.sh create
+./scripts/zos-backup.sh verify <create 返回的 object_key>
+```
+
+恢复演练会导出数据库和密钥，但不会覆盖运行中的数据库：
+
+```bash
+./scripts/zos-backup.sh restore <object_key> ./restore-drill
+```
+
+输出目录必须不存在；目录权限为 `700`，数据库和密钥文件权限为 `600`。验证首次手动
+备份后，安装每天 02:17 执行的用户 crontab：
+
+```bash
+./scripts/install-backup-cron.sh
+```
+
+备份脚本不删除对象。版本保留、30 天合规保留和过期清理由私有 Bucket 策略负责。
+
 ## 运维边界
 
 - 服务没有应用层认证，只允许绑定可信局域网 IP；不要把端口暴露到公网。
 - 设置请求会携带 AK/SK，正式环境应放在内网 HTTPS 反向代理后，且禁止代理日志记录请求体。
-- `zos-database` 保存 SQLite 和加密后的配置；`zos-temporary` 只保存请求期临时文件。数据库卷需要定期快照或在线备份。
+- `zos-database` 保存 SQLite 和加密后的配置；`zos-temporary` 只保存请求期临时文件。异地备份必须同时包含数据库和 `SETTINGS_ENCRYPTION_KEY`。
 - 服务为上传对象请求 `public-read` canned ACL；Bucket Policy、账号权限、生命周期、未完成 multipart 清理和对象删除仍在 ZOS 侧管理。
 - 当前标准 S3 Client 覆盖 HeadBucket、上传、multipart 和 HeadObject。ZOS 扩展 Bucket 指标依赖兼容 SDK；关闭指标不会影响核心上传与本地 Dashboard。

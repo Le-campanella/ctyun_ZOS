@@ -82,13 +82,16 @@
 - 2026-07-31：真实 ZOS 验收通过 1 MiB 单任务、4 个并发 20 MiB multipart、190 MiB 近上限文件及显式 `default` 预设上传；7 个对象均完成公网 HEAD 和严格删除，无验收对象遗留。
 - 2026-07-31：不存在 Bucket 的候选连接测试返回 `502 STORAGE_BUCKET_UNAVAILABLE`，当前 active revision 保持为 1。
 - 2026-07-31：受控重启后容器恢复 healthy，`/readyz` 显示 schema、恢复、存储探测和三个后台任务全部正常，`restart=unless-stopped`。
+- 2026-07-31：为独立私有备份 Bucket 增加 SQLite Online Backup、数据库与 `SETTINGS_ENCRYPTION_KEY` 归档、PBKDF2 + Fernet 认证加密和 `private` ACL 上传。
+- 2026-07-31：增加远端 HeadObject 大小确认、下载摘要、解密、SQLite `integrity_check`、非覆盖式恢复导出和每日 crontab 安装入口；错误密码、篡改、不安全 Endpoint 和文件权限测试通过。
+- 2026-07-31：自动测试增加到 64 项；备份代码和生产镜像构建通过，等待服务器本地填写专用 AK/SK 与独立备份密码后执行首次真实备份。
 
 ## 尚未完成
 
 - 配置第二个真实 Bucket 和版本化 Bucket 后，验收跨 Bucket 路由、精确 VersionId 删除及外部替换对象保护。
 - 完成上传/删除过程断网或杀进程等破坏性故障注入；当前重启恢复和模拟故障测试已通过。
-- 在目标局域网部署内网 HTTPS 反向代理、网络访问控制、数据库备份和 Bucket 生命周期规则；这些属于部署环境工作。
+- 在服务器本地配置备份凭证、执行首次真实备份和恢复演练并安装定时任务。
 
 ## 下一步
 
-准备第二个测试 Bucket 后继续多预设与版本化对象验收；部署侧下一步是内网 HTTPS、访问控制、定时数据库备份和 Bucket 生命周期规则。
+先完成私有 Bucket 的首次真实备份、恢复演练和定时任务；之后准备第二个业务测试 Bucket，继续多预设与版本化对象验收。
