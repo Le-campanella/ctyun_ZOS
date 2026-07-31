@@ -15,7 +15,12 @@ import anyio
 from .config import Settings
 from .database import Database, RevisionConflict, utc_now
 from .eventlog import EventLogger, NOTIFY
-from .providers import ProviderError, ProviderRegistry, StorageProvider
+from .providers import (
+    ProviderError,
+    ProviderRegistry,
+    StorageProvider,
+    require_matching_size,
+)
 from .security import CredentialCipher
 
 
@@ -337,27 +342,45 @@ class Runtime:
                         "RECOVERY_PENDING", "任务对应的存储配置不存在", uncertain=True
                     )
                 provider = self.provider_for_record(record)
-                result = await anyio.to_thread.run_sync(
+                metadata = await anyio.to_thread.run_sync(
                     provider.head_object, task["object_key"]
                 )
-                if result is None:
+                if metadata is None:
                     self.database.update_task(
                         task["id"],
                         status="failed",
+                        object_status="absent",
                         error_code="SERVICE_RESTARTED_OBJECT_NOT_FOUND",
                         finished_at=utc_now(),
                     )
                 else:
+                    if task["size_bytes"] is not None:
+                        require_matching_size(metadata, task["size_bytes"])
                     self.database.update_task(
                         task["id"],
                         status="succeeded",
-                        size_bytes=result.get("size_bytes"),
+                        size_bytes=metadata.size_bytes,
+                        etag=metadata.etag,
+                        version_id=metadata.version_id,
+                        object_status="present",
                         error_code=None,
                         finished_at=utc_now(),
                     )
+            except ProviderError as exc:
+                self.database.update_task(
+                    task["id"],
+                    status="unknown",
+                    object_status="pending",
+                    error_code=exc.code
+                    if exc.code == "OBJECT_SIZE_MISMATCH"
+                    else "RECOVERY_PENDING",
+                )
             except Exception:
                 self.database.update_task(
-                    task["id"], status="unknown", error_code="RECOVERY_PENDING"
+                    task["id"],
+                    status="unknown",
+                    object_status="pending",
+                    error_code="RECOVERY_PENDING",
                 )
         self.recovery_complete = True
 

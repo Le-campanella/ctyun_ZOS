@@ -3,7 +3,7 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v3
-implementation_status: schema_ready
+implementation_status: object_metadata_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
@@ -291,6 +291,9 @@ Idempotency-Replayed: true
 | 500 | `INTERNAL_ERROR` | 未分类内部异常 | 视失败阶段而定 |
 | 502 | `UPLOAD_FAILED` | Storage Provider 明确拒绝或上传失败 | `failed` |
 | 502 | `STORAGE_TIMEOUT` | Storage Provider 请求超时 | `failed` 或 `unknown` |
+| 502 | `UPLOAD_CONFIRMATION_PENDING` | 上传返回成功，但 HeadObject 暂未找到对象 | `unknown` |
+| 502 | `UPLOAD_CONFIRMATION_FAILED` | Provider 返回的对象确认结果无效或无法读取 | `unknown` |
+| 502 | `OBJECT_SIZE_MISMATCH` | HeadObject 大小与本次接收大小不一致 | `unknown` |
 | 503 | `UPLOAD_CAPACITY_EXCEEDED` | 并发上传槽位已满 | 无新任务 |
 | 503 | `STORAGE_NOT_CONFIGURED` | 显式预设没有 active 配置 | 无新任务 |
 | 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 未指定预设且默认预设不可用 | 无新任务 |

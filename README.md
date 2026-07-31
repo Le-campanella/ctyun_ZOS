@@ -5,7 +5,8 @@
 ## 当前发布基线
 
 - 当前 HTTP 契约：API v1，上传成功只返回 `task_id`、`key`、`url`。
-- 当前仓库数据库：schema v3；运行行为仍使用自动创建或迁移的 `default` 预设，尚未开放多预设 API。
+- 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
+- 运行行为仍使用自动创建或迁移的 `default` 预设，尚未开放多预设 API。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 
@@ -92,7 +93,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖上传成功/失败/待确认、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
+测试覆盖上传成功/失败/待确认、HeadObject 缺失/超时/大小不一致、元数据持久化、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
 
 ## 部署到局域网服务器
 

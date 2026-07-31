@@ -110,6 +110,9 @@ class TaskItemResponse(ContractModel):
     public_url: str | None
     status: str
     size_bytes: int | None
+    etag: str | None
+    version_id: str | None
+    object_status: str
     error_code: str | None
     created_at: str
     finished_at: str | None

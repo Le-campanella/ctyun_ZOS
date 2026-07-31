@@ -41,7 +41,12 @@ from .models import (
     TaskListResponse,
     UploadResponseV1,
 )
-from .providers import ProviderError, ProviderRegistry, default_registry
+from .providers import (
+    ProviderError,
+    ProviderRegistry,
+    default_registry,
+    require_matching_size,
+)
 from .runtime import Runtime
 
 
@@ -315,6 +320,9 @@ def _task_item(task: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
         "public_url": task["public_url"] if task["status"] == "succeeded" else None,
         "status": task["status"],
         "size_bytes": task["size_bytes"],
+        "etag": task.get("etag"),
+        "version_id": task.get("version_id"),
+        "object_status": task.get("object_status", "pending"),
         "error_code": task["error_code"],
         "created_at": task["created_at"],
         "finished_at": task["finished_at"],
@@ -664,12 +672,36 @@ def create_app(
                 raise APIError(
                     502, exc.code, exc.message, task_id=task_id
                 ) from exc
+            try:
+                metadata = await anyio.to_thread.run_sync(
+                    provider.head_object, object_key
+                )
+                if metadata is None:
+                    raise ProviderError(
+                        "UPLOAD_CONFIRMATION_PENDING",
+                        "上传已返回成功，但暂时无法确认远端对象",
+                        uncertain=True,
+                    )
+                require_matching_size(metadata, size)
+            except ProviderError as exc:
+                runtime.database.update_task(
+                    task_id,
+                    status="unknown",
+                    size_bytes=size,
+                    object_status="pending",
+                    error_code=exc.code,
+                    duration_ms=_duration(request),
+                )
+                raise APIError(502, exc.code, exc.message, task_id=task_id) from exc
             duration = _duration(request)
             try:
                 runtime.database.update_task(
                     task_id,
                     status="succeeded",
-                    size_bytes=size,
+                    size_bytes=metadata.size_bytes,
+                    etag=metadata.etag,
+                    version_id=metadata.version_id,
+                    object_status="present",
                     error_code=None,
                     finished_at=utc_now(),
                     duration_ms=duration,

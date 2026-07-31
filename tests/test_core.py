@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 
 from app.database import Database, RevisionConflict, SCHEMA_VERSION, utc_now
 from app.eventlog import EventLogger, NOTIFY
-from app.providers import CtyunZosProvider, ProviderError
+from app.providers import CtyunZosProvider, ObjectMetadata, ProviderError
 from app.security import CredentialCipher
 
 
@@ -228,6 +228,7 @@ class FakeS3:
     def __init__(self):
         self.uploaded = None
         self.objects = {}
+        self.last_head_request = None
 
     def head_bucket(self, **_kwargs):
         return {}
@@ -236,7 +237,9 @@ class FakeS3:
         self.uploaded = (bucket, key, ExtraArgs, fileobj.read(), Config)
         self.objects[key] = self.uploaded[3]
 
-    def head_object(self, Bucket, Key):
+    def head_object(self, **request):
+        self.last_head_request = request
+        Key = request["Key"]
         if Key not in self.objects:
             from botocore.exceptions import ClientError
 
@@ -247,7 +250,13 @@ class FakeS3:
                 },
                 "HeadObject",
             )
-        return {"ContentLength": len(self.objects[Key])}
+        return {
+            "ContentLength": len(self.objects[Key]),
+            "ETag": '"fake-etag"',
+            "VersionId": "version-1",
+            "ContentType": "application/pdf",
+            "LastModified": datetime(2026, 7, 31, tzinfo=UTC),
+        }
 
 
 def valid_config() -> dict:
@@ -283,7 +292,14 @@ def test_zos_provider_validation_upload_url_and_head(settings):
         provider.build_public_url("2026/07/29/a b.pdf")
         == "https://bucket-1.example.com/base/2026/07/29/a%20b.pdf"
     )
-    assert provider.head_object("2026/07/29/a b.pdf") == {"size_bytes": 5}
+    assert provider.head_object("2026/07/29/a b.pdf", "version-1") == ObjectMetadata(
+        size_bytes=5,
+        etag='"fake-etag"',
+        version_id="version-1",
+        content_type="application/pdf",
+        last_modified="2026-07-31T00:00:00+00:00",
+    )
+    assert fake.last_head_request["VersionId"] == "version-1"
     assert provider.head_object("missing") is None
 
 

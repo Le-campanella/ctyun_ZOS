@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from threading import Event
-from typing import Any, BinaryIO
+from typing import BinaryIO
 from uuid import uuid4
 
 import pytest
@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.database import utc_now
 from app.main import create_app
 from app.providers import (
+    ObjectMetadata,
     ProviderError,
     ProviderRegistry,
     StorageProvider,
@@ -67,9 +68,23 @@ class FakeProvider(StorageProvider):
             raise ProviderError("UPLOAD_FAILED", "failed")
         self.__class__.objects[object_key] = fileobj.read()
 
-    def head_object(self, object_key: str) -> dict[str, Any] | None:
+    def head_object(
+        self, object_key: str, version_id: str | None = None
+    ) -> ObjectMetadata | None:
+        if self.config.get("head_timeout"):
+            raise ProviderError("STORAGE_TIMEOUT", "timeout", uncertain=True)
+        if self.config.get("head_missing"):
+            return None
         value = self.__class__.objects.get(object_key)
-        return {"size_bytes": len(value)} if value is not None else None
+        if value is None:
+            return None
+        return ObjectMetadata(
+            size_bytes=len(value) + self.config.get("head_size_delta", 0),
+            etag='"fake-etag"',
+            version_id=version_id or self.config.get("version_id"),
+            content_type="application/octet-stream",
+            last_modified="2026-07-31T00:00:00Z",
+        )
 
     def build_public_url(self, object_key: str) -> str:
         return f"{self.config['public_base_url'].rstrip('/')}/{object_key}"
@@ -267,7 +282,7 @@ def test_settings_require_header_and_revision_and_keep_old_on_probe_failure(clie
 
 
 def test_upload_success_task_list_detail_stats_and_logs(client):
-    activate(client)
+    activate(client, version_id="version-1")
     response = client.post(
         "/v1/uploads",
         headers={"X-Request-ID": "request-1", "Idempotency-Key": "job-1"},
@@ -282,6 +297,9 @@ def test_upload_success_task_list_detail_stats_and_logs(client):
     tasks = client.get("/v1/upload-tasks?status=succeeded").json()["items"]
     assert tasks[0]["filename"] == "Report.PDF"
     assert tasks[0]["size_bytes"] == 5
+    assert tasks[0]["etag"] == '"fake-etag"'
+    assert tasks[0]["version_id"] == "version-1"
+    assert tasks[0]["object_status"] == "present"
     assert tasks[0]["request_id"] == "request-1"
     detail = client.get(f"/v1/upload-tasks/{result['task_id']}").json()
     assert detail["idempotency_key"] == "job-1"
@@ -363,6 +381,26 @@ def test_uncertain_upload_is_recoverable_and_hides_url(client):
     task = client.get(f"/v1/upload-tasks/{response.json()['task_id']}").json()
     assert task["status"] == "unknown"
     assert task["error_code"] == "STORAGE_TIMEOUT"
+    assert task["public_url"] is None
+
+
+@pytest.mark.parametrize(
+    ("config", "code"),
+    [
+        ({"head_missing": True}, "UPLOAD_CONFIRMATION_PENDING"),
+        ({"head_timeout": True}, "STORAGE_TIMEOUT"),
+        ({"head_size_delta": 1}, "OBJECT_SIZE_MISMATCH"),
+    ],
+)
+def test_upload_requires_matching_remote_metadata(client, config, code):
+    activate(client, **config)
+    response = client.post("/v1/uploads", files={"file": ("a.bin", b"payload")})
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == code
+    task = client.get(f"/v1/upload-tasks/{response.json()['task_id']}").json()
+    assert task["status"] == "unknown"
+    assert task["object_status"] == "pending"
     assert task["public_url"] is None
 
 
@@ -507,3 +545,43 @@ def test_recovery_resolves_existing_and_missing_objects(settings, database, regi
         states = {item["object_key"]: item["status"] for item in items}
         assert any(value == "succeeded" for value in states.values())
         assert any(value == "failed" for value in states.values())
+        object_states = {item["object_key"]: item["object_status"] for item in items}
+        assert "present" in object_states.values()
+        assert "absent" in object_states.values()
+
+
+def test_recovery_keeps_size_mismatch_unknown(settings, database, registry):
+    app = create_app(
+        settings=settings, registry=registry, database=database, background=False
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        activate(client)
+        runtime = client.app.state.runtime
+        storage = runtime.database.active_storage()
+        task_id = str(uuid4())
+        key = f"2026/07/29/{task_id}.txt"
+        runtime.database.create_task(
+            {
+                "id": task_id,
+                "request_id": task_id,
+                "idempotency_key": None,
+                "storage_config_id": storage["id"],
+                "filename": "a.txt",
+                "content_type": "text/plain",
+                "object_key": key,
+                "public_url": f"https://files.example/{key}",
+                "status": "unknown",
+                "size_bytes": 3,
+                "error_code": "RECOVERY_PENDING",
+                "created_at": utc_now(),
+                "finished_at": None,
+                "duration_ms": None,
+            }
+        )
+        FakeProvider.objects[key] = b"too-long"
+
+    with TestClient(app, raise_server_exceptions=False) as restarted:
+        task = restarted.get(f"/v1/upload-tasks/{task_id}").json()
+        assert task["status"] == "unknown"
+        assert task["object_status"] == "pending"
+        assert task["error_code"] == "OBJECT_SIZE_MISMATCH"

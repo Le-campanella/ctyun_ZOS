@@ -38,6 +38,24 @@ class ProbeResult:
     latency_ms: int
 
 
+@dataclass(frozen=True)
+class ObjectMetadata:
+    size_bytes: int
+    etag: str | None
+    version_id: str | None
+    content_type: str | None
+    last_modified: str | None
+
+
+def require_matching_size(metadata: ObjectMetadata, expected_size: int) -> None:
+    if metadata.size_bytes != expected_size:
+        raise ProviderError(
+            "OBJECT_SIZE_MISMATCH",
+            "远端对象大小与接收文件不一致",
+            uncertain=True,
+        )
+
+
 class StorageProvider(ABC):
     provider_id: str
     schema_version: int
@@ -61,7 +79,9 @@ class StorageProvider(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def head_object(self, object_key: str) -> dict[str, Any] | None: ...
+    def head_object(
+        self, object_key: str, version_id: str | None = None
+    ) -> ObjectMetadata | None: ...
 
     @abstractmethod
     def build_public_url(self, object_key: str) -> str: ...
@@ -320,21 +340,48 @@ class CtyunZosProvider(StorageProvider):
         except Exception as exc:
             raise ProviderError("UPLOAD_FAILED", "Storage Provider 上传失败") from exc
 
-    def head_object(self, object_key: str) -> dict[str, Any] | None:
+    def head_object(
+        self, object_key: str, version_id: str | None = None
+    ) -> ObjectMetadata | None:
+        request = {"Bucket": self.bucket, "Key": object_key}
+        if version_id is not None:
+            request["VersionId"] = version_id
         try:
-            response = self.client.head_object(Bucket=self.bucket, Key=object_key)
-            return {"size_bytes": response.get("ContentLength")}
+            response = self.client.head_object(**request)
+            size = response.get("ContentLength")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise ProviderError(
+                    "UPLOAD_CONFIRMATION_FAILED",
+                    "Storage Provider 返回的对象大小无效",
+                    uncertain=True,
+                )
+            last_modified = response.get("LastModified")
+            return ObjectMetadata(
+                size_bytes=size,
+                etag=response.get("ETag"),
+                version_id=response.get("VersionId"),
+                content_type=response.get("ContentType"),
+                last_modified=last_modified.isoformat()
+                if hasattr(last_modified, "isoformat")
+                else None,
+            )
+        except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError) as exc:
+            raise ProviderError(
+                "STORAGE_TIMEOUT", "Storage Provider 对象确认超时", uncertain=True
+            ) from exc
         except ClientError as exc:
             status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
             code = exc.response.get("Error", {}).get("Code")
             if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
                 return None
             raise ProviderError(
-                "RECOVERY_PENDING", "暂时无法确认远端对象", uncertain=True
+                "UPLOAD_CONFIRMATION_FAILED", "暂时无法确认远端对象", uncertain=True
             ) from exc
+        except ProviderError:
+            raise
         except Exception as exc:
             raise ProviderError(
-                "RECOVERY_PENDING", "暂时无法确认远端对象", uncertain=True
+                "UPLOAD_CONFIRMATION_FAILED", "暂时无法确认远端对象", uncertain=True
             ) from exc
 
     def build_public_url(self, object_key: str) -> str:
