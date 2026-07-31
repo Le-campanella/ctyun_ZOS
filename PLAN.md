@@ -1,6 +1,6 @@
-# 局域网轻量文件上传服务实施计划（ZOS v1）
+# 局域网轻量文件上传服务实施计划（ZOS v2）
 
-> 状态：v4 方案已确认，实施中。
+> 状态：v5 方案已确认，删除能力待实现。
 >
 > 完整调用方与 Dashboard 接口契约见 [API.md](API.md)。本文与 `API.md` 已完成同步。
 
@@ -16,6 +16,7 @@
 6. Dashboard 提供存储设置页，可测试、保存并激活 ZOS Endpoint（SDK 上传接口地址）、Bucket、对象访问根地址、AK、SK 和连接参数。
 7. 保存并展示 `NOTIFY` 及以上级别的结构化运行日志。
 8. 在服务异常重启后，通过存储 Provider 的对象元数据接口恢复可确认的上传结果。
+9. 允许上传调用方凭对象级删除凭证严格删除该任务创建的 ZOS 对象，并永久保留删除审计记录。
 
 ## 2. 信任边界与范围
 
@@ -23,7 +24,8 @@
 
 - 服务仅发布到受控局域网地址或容器内部网络。
 - API 与 Dashboard 共用同一个局域网端口。
-- 服务不设置调用方认证、登录、用户、角色或权限系统。
+- 服务不设置统一的调用方认证、登录、用户、角色或权限系统。
+- 对象删除是例外的破坏性操作，必须同时提供任务 ID 和上传成功时返回的对象级 `delete_token`；该 token 是持有者凭证，不代替未来的统一服务认证。
 - 局域网内能够访问该端口的客户端可以读取监控信息，也可以修改存储设置。
 - 局域网、防火墙、交换机 VLAN 和部署平台的端口暴露规则构成访问边界。
 - 部署配置禁止公网入口、端口转发和公有负载均衡器。
@@ -38,6 +40,7 @@
 服务包含：
 
 - 上传文件。
+- 删除本服务成功上传且可以严格确认身份的对象。
 - 查询上传任务。
 - 查询任务详情。
 - 查询上传流量统计。
@@ -49,14 +52,15 @@
 服务范围之外：
 
 - 持久化保存文件本体。
-- 代理下载、更新、删除、重命名或列出 ZOS 对象。
+- 代理下载、更新、重命名或列出 ZOS 对象。
+- 删除调用方任意指定的 Bucket、对象 Key、URL 或非本服务上传的对象。
 - 由调用方指定 Bucket、对象 ACL 或任意对象 Key。
 - 文件去重、内容搜索、文件分类、版本管理和素材管理。
 - Dashboard 内执行文件上传、任务重试、对象删除或 Bucket 权限管理。
 - 通过 Dashboard 创建、删除或修改 ZOS Bucket、生命周期、ACL、策略、版本控制或 CORS。
 - 消息队列、独立异步 Worker、ORM 和完整数据库迁移框架。
 
-文件过期、历史版本清理和未完成分段上传清理由 ZOS Bucket 生命周期规则负责。
+文件过期、非本服务创建的对象、历史版本清理和未完成分段上传清理由 ZOS Bucket 生命周期规则负责。
 
 ## 3. 技术方案
 
@@ -86,6 +90,7 @@ Python 3.11 同时满足常规运行环境和当前 ZOS 官方 Python SDK 的版
 │ ZOS 轻量上传服务                                          │
 │                                                           │
 │  上传 API ─────────┐                                      │
+│  删除 API ─────────┤                                      │
 │  查询 API ─────────┼──> SQLite                            │
 │  Dashboard API ────┤    - storage_configs                 │
 │  设置 API ─────────┤    - upload_tasks                    │
@@ -133,6 +138,10 @@ YYYY/MM/DD/{task_id}.{safe_extension}
 ```
 
 公网 URL 由任务绑定的 storage config revision 中的 `public_base_url` 与 `object_key` 生成，并将完整结果写入任务记录。调用方继续把 URL 当作不透明字符串使用。
+
+上传成功后额外通过对象元数据接口确认并保存 `ETag`、可选 `VersionId` 和对象大小。`ETag` 是 Provider 返回的不透明标识，multipart 场景下不得当作文件 MD5。上传响应只返回稳定的删除清单，不返回 Bucket、Endpoint、AK/SK、配置 ID、SDK 原始响应或签名信息。
+
+`delete_token` 使用密码学安全随机数生成 256-bit URL-safe token。数据库只保存 token 的 SHA-256 哈希，并通过任务行把它绑定到配置 ID、对象 Key、ETag、VersionId 和大小；服务不保存 token 明文。token 只在首次 `201` 响应中返回一次，幂等重放不会补发。调用方必须把 token 当作密码保存，不得写入 URL、普通业务日志或任务查询缓存。
 
 ## 6. 请求接收、临时文件与并发控制
 
@@ -245,6 +254,19 @@ CREATE TABLE upload_tasks (
         status IN ('uploading', 'unknown', 'succeeded', 'failed')
     ),
     size_bytes         INTEGER,
+    etag               TEXT,
+    version_id         TEXT,
+    delete_token_hash  BLOB,
+    object_status      TEXT NOT NULL CHECK (
+        object_status IN (
+            'pending', 'present', 'absent', 'legacy_unverified',
+            'deleting', 'deleted', 'delete_unknown'
+        )
+    ),
+    delete_request_id  TEXT,
+    delete_error_code  TEXT,
+    delete_started_at  TEXT,
+    deleted_at         TEXT,
     error_code         TEXT,
     created_at         TEXT NOT NULL,
     finished_at        TEXT,
@@ -266,6 +288,9 @@ ON upload_tasks(request_id);
 
 CREATE INDEX idx_upload_tasks_storage_config_id
 ON upload_tasks(storage_config_id);
+
+CREATE INDEX idx_upload_tasks_object_status
+ON upload_tasks(object_status, created_at DESC);
 ```
 
 字段约定：
@@ -282,10 +307,20 @@ ON upload_tasks(storage_config_id);
 | `public_url` | 成功后返回的完整 URL |
 | `status` | `uploading`、`unknown`、`succeeded`、`failed` |
 | `size_bytes` | 已确认的文件大小；无法确认时为空 |
+| `etag` | 上传后 `HeadObject` 返回的不透明 ETag；不得假设为 MD5 |
+| `version_id` | Provider 返回的对象版本 ID；未启用或不支持版本控制时为空 |
+| `delete_token_hash` | 对象级删除凭证的 SHA-256 哈希；明文 token 不持久化 |
+| `object_status` | `pending`、`present`、`absent`、`legacy_unverified`、`deleting`、`deleted` 或 `delete_unknown` |
+| `delete_request_id` | 最近一次删除请求的追踪 ID |
+| `delete_error_code` | 最近一次删除失败或不确定结果的稳定错误码 |
+| `delete_started_at` | 最近一次删除开始时间 |
+| `deleted_at` | 服务确认目标对象或精确版本不存在的时间 |
 | `error_code` | 当前错误或恢复状态码 |
 | `created_at` | UTC ISO 8601 创建时间 |
 | `finished_at` | UTC ISO 8601 完成时间 |
 | `duration_ms` | 完整请求处理耗时 |
+
+schema v1 升级到 v2 时不伪造历史元数据：旧的成功任务设置为 `legacy_unverified`，其他旧任务按可确认结果设置为 `pending` 或 `absent`。历史任务不会自动获得可对外使用的删除凭证；只有经过显式、受审计的后续校验或重新上传后才能进入严格删除范围。
 
 ### 7.3 运行日志表
 
@@ -343,9 +378,10 @@ PRAGMA foreign_keys=ON;
 6. 在 SQLite 中原子写入 `uploading` 任务，同时记录 `storage_config_id`。
 7. 写入临时文件，同时校验空文件、文件大小和客户端连接状态。
 8. 通过该配置对应的 Provider adapter 上传文件。
-9. Provider 返回成功后，将任务更新为 `succeeded`，写入大小、完成时间和耗时。
-10. 数据库更新成功后向调用方返回 `201`。
-11. 任一步骤失败时，将可定位任务更新为 `failed`，写入稳定错误码并清理临时文件。
+9. 上传返回成功后执行 `HeadObject`，确认并保存大小、ETag、可选 VersionId，将上传状态更新为 `succeeded`、对象状态更新为 `present`。
+10. 生成随机对象级 `delete_token`，在同一数据库事务中只保存哈希。
+11. 数据库更新成功后向调用方返回 `201` 和稳定删除清单。
+12. 任一步骤失败时，将可定位任务更新为 `failed` 或 `unknown`，写入稳定错误码并清理临时文件。
 
 对象 Key、配置 revision 和公网 URL 在上传前持久化。设置切换不会改变已经创建任务的目标位置。
 
@@ -378,7 +414,7 @@ PRAGMA foreign_keys=ON;
 
 1. 读取任务的 `storage_config_id` 并解密对应凭证。
 2. 通过对应 Provider 调用对象元数据接口；`ctyun_zos` 使用 `HeadObject(Bucket, object_key)`。
-3. 对象存在：更新为 `succeeded`，写入返回的对象大小、完成时间和既有 URL。
+3. 对象存在：更新为 `succeeded` 和 `present`，写入返回的对象大小、ETag、可选 VersionId、完成时间和既有 URL。
 4. Provider 明确返回对象不存在：更新为 `failed`，错误码为 `SERVICE_RESTARTED_OBJECT_NOT_FOUND`。
 5. 超时、网络异常、认证异常或服务端错误：更新为 `unknown`，错误码为 `RECOVERY_PENDING`。
 6. 进程内周期任务继续扫描全部 `unknown` 任务，以及超过 `STALE_UPLOAD_SECONDS` 的 `uploading` 任务，默认每 60 秒重试。
@@ -387,7 +423,25 @@ PRAGMA foreign_keys=ON;
 
 ### 8.5 正常上传确认
 
-正常请求以 Provider 上传方法的成功返回作为上传确认，不为每次成功上传额外增加对象元数据请求。对象元数据接口专用于异常恢复、连接诊断和运维检查。
+正常请求在 Provider 上传方法成功返回后必须执行一次对象元数据读取。只有对象大小与本次接收大小一致，且 ETag 等稳定身份字段已经持久化时，才将对象状态设为 `present` 并返回删除凭证。
+
+上传成功但元数据读取超时或结果不完整时，任务进入 `unknown`、对象状态保持 `pending`，不返回删除凭证。启动和周期恢复继续使用任务绑定的 Provider revision 确认对象；恢复成功后任务可转为 `succeeded`，但不会通过任务查询接口补发删除凭证。
+
+### 8.6 对象删除状态流
+
+删除只使用任务绑定的不可变 `storage_config_id` 和数据库中的 `object_key`。请求体、查询参数和 Header 均不得覆盖 Provider、Endpoint、Bucket、对象 Key 或 VersionId。
+
+1. 校验任务 UUID 和 `X-Delete-Token` 格式，并使用常量时间比较验证签名。
+2. 读取任务及其原 storage config；只允许 `status=succeeded` 且 `object_status=present` 的任务进入删除。
+3. 在短事务内执行 `present → deleting` 条件更新，写入 `delete_request_id` 和 `delete_started_at`；更新行数为 0 时按当前状态返回幂等成功或冲突。
+4. 通过原配置创建 Provider，执行 `HeadObject`；比较保存的大小、ETag 和可选 VersionId。
+5. 元数据不一致时恢复为 `present`，记录 `OBJECT_CHANGED` 并返回 `409`，不调用删除。
+6. 有 VersionId 时删除该精确版本；否则删除任务保存的对象 Key。
+7. 再次查询相同 Key 或精确 VersionId，只有明确不存在时更新为 `deleted`、写入 `deleted_at` 并返回成功。
+8. Provider 明确拒绝删除时恢复为 `present` 并记录稳定错误码；超时或连接中断时进入 `delete_unknown`，绝不谎报成功。
+9. 周期恢复扫描 `delete_unknown` 和超时的 `deleting`：确认不存在则转为 `deleted`，确认仍为原对象则转回 `present`，无法确认则继续保持 `delete_unknown`。
+
+重复删除已经为 `deleted` 的任务返回 `200` 和 `already_deleted=true`，不再次请求 ZOS。删除前对象已经明确不存在时，可以记为 `deleted` 并返回 `already_absent=true`，同时保留审计日志。删除只确认 ZOS 源对象或精确版本不存在，不保证 CDN、代理或第三方缓存立即失效。
 
 ## 9. 幂等语义
 
@@ -409,6 +463,8 @@ Idempotency-Key: opaque-key-up-to-128-chars
 
 幂等键的唯一性通过 SQLite 唯一索引和短事务保证。
 
+成功上传的幂等重放返回原任务和对象元数据，但 `delete_token=null`，不会补发首次响应中的删除凭证。`Idempotency-Key` 不是认证凭证，不能用来恢复删除权限。首次 `201` 丢失时，在统一内部认证或受控管理恢复能力实现前，该对象不能通过公开删除 API 删除。删除接口本身按任务和对象状态幂等，不再引入第二套删除幂等键。
+
 ## 10. API
 
 ### 10.1 上传文件
@@ -422,13 +478,18 @@ Idempotency-Key: optional
 file=<binary>
 ```
 
-成功响应保持现有结构：
+成功响应保持原字段并增加稳定对象元数据和删除凭证：
 
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "key": "2026/07/28/550e8400-e29b-41d4-a716-446655440000.pdf",
-  "url": "https://public-bucket.example.com/2026/07/28/550e8400-e29b-41d4-a716-446655440000.pdf"
+  "url": "https://public-bucket.example.com/2026/07/28/550e8400-e29b-41d4-a716-446655440000.pdf",
+  "size_bytes": 125678,
+  "content_type": "application/pdf",
+  "etag": "\"opaque-etag\"",
+  "version_id": null,
+  "delete_token": "opaque-object-delete-capability"
 }
 ```
 
@@ -442,7 +503,8 @@ GET /v1/upload-tasks?limit=50&offset=0&status=succeeded&from=...&to=...
 - `offset` 默认 0。
 - 可选按状态和 UTC 时间范围筛选。
 - 排序固定为 `created_at DESC, id DESC`。
-- 列表增加 `request_id`、`content_type`、`object_key`、`duration_ms`、`storage_provider` 和 `storage_config_revision` 字段。
+- 列表增加 `request_id`、`content_type`、`object_key`、`duration_ms`、`storage_provider`、`storage_config_revision`、`etag`、`version_id`、`object_status` 和删除结果字段。
+- 列表和详情永远不返回 `delete_token`。
 - Dashboard 的近期上传表直接复用该接口。
 
 ### 10.3 查询单个任务
@@ -453,7 +515,19 @@ GET /v1/upload-tasks/{task_id}
 
 返回完整任务字段。任务不存在时返回 `404 TASK_NOT_FOUND`。
 
-### 10.4 健康检查
+### 10.4 删除已上传对象
+
+```http
+DELETE /v1/upload-tasks/{task_id}/object
+X-Delete-Token: required
+X-Request-ID: optional
+```
+
+调用方不提交 Bucket、对象 Key、URL 或 Provider 参数。服务从任务及其原 storage config 定位对象，执行元数据比对、精确版本删除和删除后确认。成功响应返回任务 ID、Key、对象状态、删除时间以及 `already_deleted` / `already_absent` 标志。
+
+`delete_token` 只在首次上传成功的 `201` 中返回；成功上传的幂等重放返回 `delete_token=null`。任务列表、任务详情、Dashboard、日志和错误响应均不返回 token 或 token 哈希。历史 `legacy_unverified` 任务默认不具备可用删除凭证，也不能通过该接口删除。
+
+### 10.5 健康检查
 
 ```http
 GET /healthz
@@ -461,7 +535,7 @@ GET /healthz
 
 只表示进程可以响应，返回 `200`。
 
-### 10.5 就绪检查
+### 10.6 就绪检查
 
 ```http
 GET /readyz
@@ -478,7 +552,7 @@ GET /readyz
 
 任一关键项失败时返回 `503` 和各依赖项状态。
 
-### 10.6 Dashboard 数据接口
+### 10.7 Dashboard 数据接口
 
 ```http
 GET /v1/dashboard/summary?from=...&to=...
@@ -489,7 +563,7 @@ GET /v1/dashboard/storage?from=...&to=...
 
 `/v1/dashboard/storage` 是否启用由 active storage config 的 Provider 能力和 `enable_bucket_metrics` 决定，关闭时返回明确的 disabled 状态。
 
-### 10.7 存储设置接口
+### 10.8 存储设置接口
 
 ```http
 GET  /v1/settings/storage/providers
@@ -507,7 +581,7 @@ PUT  /v1/settings/storage
 
 所有响应时间字段使用 UTC ISO 8601。Dashboard 按 `APP_TIMEZONE` 显示。
 
-### 10.8 局域网文件接收测试
+### 10.9 局域网文件接收测试
 
 ```http
 POST /v1/uploads/validate
@@ -636,7 +710,7 @@ Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区�
 - `average_duration_ms`：已完成任务平均耗时。
 - `p95_duration_ms`：已完成任务耗时的第 95 百分位。
 
-时间序列只汇总成功上传字节数，同时附带任务状态计数。幂等重放不会创建新任务，因此不会重复计入流量。
+时间序列只汇总成功上传字节数，同时附带任务状态计数。幂等重放不会创建新任务，因此不会重复计入流量。对象后续删除不改变历史上传成功率或上传字节统计。
 
 ### 12.2 Provider 原生统计（ZOS v1）
 
@@ -682,6 +756,12 @@ NOTIFY = 25
 - `upload_failed`
 - `upload_capacity_rejected`
 - `idempotency_replayed`
+- `delete_started`
+- `delete_succeeded`
+- `delete_already_absent`
+- `delete_rejected`
+- `delete_pending`
+- `delete_recovery_resolved`
 - `database_error`
 - `storage_probe_failed`
 - `storage_metrics_failed`
@@ -704,7 +784,7 @@ NOTIFY = 25
 - `storage_provider`
 - `storage_config_revision`
 
-日志内容执行长度限制和控制字符清洗。AK、SK、请求文件内容和完整环境变量永远不进入日志。
+删除事件只记录任务 ID、请求 ID、Provider、配置 revision、对象 Key、对象状态和稳定错误码。日志内容执行长度限制和控制字符清洗。AK、SK、`delete_token`、请求文件内容和完整环境变量永远不进入日志。
 
 ## 14. Storage Provider 与 ZOS SDK 策略
 
@@ -717,12 +797,13 @@ NOTIFY = 25
 - `validate_config()`：校验 Provider 专属设置与凭证 envelope。
 - `create_client()`：根据已解密凭证创建 Client。
 - `test_connection()`：执行低副作用连通性检查。
-- `upload_file()`：上传文件并返回 Provider 原始确认信息。
-- `head_object()`：恢复任务和诊断对象状态。
+- `upload_file()`：上传文件。
+- `head_object()`：返回大小、ETag 和可选 VersionId，用于上传确认、恢复和删除前后校验。
+- `delete_object()`：按对象 Key 和可选 VersionId 删除精确目标。
 - `get_metrics()`：获取可选 Provider 指标。
 - `build_public_url()`：使用已保存的访问根地址构造 URL。
 
-上传调用方只依赖本服务的 HTTP API。未来增加其他 SDK 或对象存储时，新增 adapter 和 provider preset，不改变 `/v1/uploads` 的请求及成功响应。
+上传调用方只依赖本服务的 HTTP API。未来增加其他 SDK 或对象存储时，新增 adapter 和 provider preset，不改变 `/v1/uploads` 请求或删除接口的 Provider-neutral 语义。
 
 ### 14.2 `ctyun_zos` 预设
 
@@ -755,6 +836,7 @@ enable_bucket_metrics
 - multipart upload
 - `HeadObject`
 - `HeadBucket`
+- `DeleteObject`
 
 上传时设置：
 
@@ -763,6 +845,8 @@ enable_bucket_metrics
 - 文件 Content-Type。
 - canned ACL `public-read`；调用方无权覆盖。
 - botocore 请求与响应 checksum 策略固定为 `when_required`，兼容 ZOS 对 `x-amz-content-sha256` 的校验。
+
+`upload_fileobj` 本身不返回稳定对象元数据，因此成功返回后使用 `HeadObject` 获取 ETag、大小和可选 VersionId。删除时若存在 VersionId，必须把它传给 `DeleteObject`，并针对同一版本执行删除后确认；无 VersionId 时才按 Key 删除。
 
 ### 14.4 超时、重试与连接池
 
@@ -826,16 +910,21 @@ MAX_CONCURRENT_UPLOADS × S3_TRANSFER_MAX_CONCURRENCY + 4
 | 400 | `BAD_REQUEST` | multipart 或查询参数错误 |
 | 400 | `STORAGE_CONFIG_INVALID` | Provider、schema version、设置字段、URL、Bucket、凭证格式或参数不合法 |
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/Endpoint 变化时缺少完整 AK/SK |
+| 403 | `DELETE_TOKEN_INVALID` | 删除凭证缺失、格式错误或与任务不匹配 |
 | 404 | `TASK_NOT_FOUND` | 任务不存在 |
 | 409 | `CONFIG_REVISION_CONFLICT` | `expected_revision` 与当前 active revision 不一致 |
 | 409 | `UPLOAD_IN_PROGRESS` | 同一幂等键对应任务仍在处理或待确认 |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | 同一幂等键已对应失败任务 |
+| 409 | `OBJECT_NOT_DELETABLE` | 任务状态、对象状态或历史元数据不满足严格删除条件 |
+| 409 | `OBJECT_CHANGED` | 删除前对象大小、ETag 或 VersionId 与上传记录不一致 |
+| 409 | `DELETE_IN_PROGRESS` | 同一对象已有删除请求正在执行或等待确认 |
 | 413 | `FILE_TOO_LARGE` | 文件超过上限 |
 | 500 | `DATABASE_ERROR` | SQLite 异常 |
 | 500 | `SETTINGS_STORAGE_ERROR` | 设置加密、写入或 Client 切换失败 |
 | 500 | `INTERNAL_ERROR` | 未分类内部异常 |
 | 502 | `UPLOAD_FAILED` | Storage Provider 明确拒绝或上传失败 |
 | 502 | `STORAGE_TIMEOUT` | Storage Provider 请求超时 |
+| 502 | `DELETE_FAILED` | Storage Provider 明确拒绝删除 |
 | 502 | `STORAGE_ENDPOINT_UNREACHABLE` | 设置测试无法连接 Endpoint |
 | 502 | `STORAGE_CREDENTIALS_REJECTED` | 设置测试中的 AK/SK 被拒绝 |
 | 502 | `STORAGE_BUCKET_UNAVAILABLE` | Bucket 不存在或当前凭证不可访问 |
@@ -845,6 +934,8 @@ MAX_CONCURRENT_UPLOADS × S3_TRANSFER_MAX_CONCURRENCY + 4
 | 503 | `STORAGE_METRICS_UNAVAILABLE` | 可选 Storage Provider 原生指标暂时不可用 |
 
 已创建任务的错误响应包含 `task_id`。错误消息用于人类阅读，程序逻辑判断 `code`。
+
+删除调用在 Provider 返回超时、连接中断或不确定响应时返回 `202`，对象状态为 `delete_unknown`，并由恢复器继续确认；不能把未知结果映射成删除成功。
 
 ## 16. 配置
 
@@ -949,7 +1040,7 @@ enable_bucket_metrics
 - Provider、`provider_schema_version` 或 `endpoint_url` 发生变化时必须同时提交新的 AK 和 SK。
 - 每次保存都创建新 revision，不原地修改历史记录。
 - 保存失败或连接测试失败时，旧 active revision 保持不变。
-- ZOS 凭证至少具备执行 HeadBucket、PutObject、设置 `public-read` 对象 ACL、multipart upload 和 HeadObject 所需的目标 Bucket 权限；启用 Bucket 指标时再增加对应统计读取权限。
+- ZOS 凭证至少具备执行 HeadBucket、PutObject、设置 `public-read` 对象 ACL、multipart upload、HeadObject 和 DeleteObject 所需的目标 Bucket 权限；Bucket 启用版本控制时还必须具备读取和删除精确版本所需权限。启用 Bucket 指标时再增加对应统计读取权限。
 - 优先使用专用 IAM 用户或服务账号的 AK/SK，并将权限范围限制在目标 Bucket；Dashboard 不管理 IAM、Bucket ACL 或 Bucket Policy。
 
 ## 17. 保留与维护
@@ -958,14 +1049,14 @@ enable_bucket_metrics
 
 - 删除超过 `LOG_RETENTION_DAYS` 的日志。
 - 超过 `LOG_MAX_ROWS` 时按最旧记录继续裁剪。
-- 删除超过 `TASK_RETENTION_DAYS` 的 `succeeded` 和 `failed` 任务。
-- 保留所有 `uploading` 和 `unknown` 任务。
+- 只删除超过 `TASK_RETENTION_DAYS` 且对象状态为 `absent` 或 `deleted` 的终态任务。
+- 无论年龄多久，保留所有 `uploading`、`unknown`、`pending`、`present`、`legacy_unverified`、`deleting` 和 `delete_unknown` 任务，避免产生无法通过服务定位的孤儿对象。
 - 保留被任何任务引用的 storage config revision。
 - 只有 inactive revision 已无任务引用且超过 `TASK_RETENTION_DAYS` 时才允许删除。
 - 执行 `PRAGMA optimize`。
 - 记录 `maintenance_completed` 日志。
 
-第一版不提供通过 HTTP 删除任务或日志的接口。
+服务仍不提供通过 HTTP 删除任务台账或日志的接口；对象删除只更新审计状态。
 
 ## 18. 部署
 
@@ -1003,6 +1094,11 @@ enable_bucket_metrics
 - 新配置测试失败时 active revision 保持不变。
 - 配置激活期间的在途上传继续使用旧 revision，新任务使用新 revision。
 - 使用测试用第二 Provider adapter 验证 `/v1/uploads`、任务查询和错误结构无需变化。
+- 上传成功后保存大小、ETag 和可选 VersionId，并仅在首次 `201` 返回对象级 `delete_token`。
+- 删除 token 缺失、篡改、跨任务使用和日志泄露测试。
+- 删除前元数据一致、大小不一致、ETag 不一致和 VersionId 不一致测试。
+- 并发删除只能有一个请求进入 Provider；重复删除返回幂等成功。
+- 历史 `legacy_unverified` 任务默认禁止 API 删除。
 
 ### 19.2 故障注入测试
 
@@ -1018,6 +1114,8 @@ enable_bucket_metrics
 - 设置 GET、错误响应、日志、数据库明文字段和浏览器存储均不出现 AK/SK。
 - active revision 切换时终止进程，重启后保持单一 active revision。
 - 未完成 multipart upload 被生命周期规则清理。
+- 删除请求在 Provider 调用前、调用中、调用后及数据库提交前终止。
+- 删除超时进入 `delete_unknown`，重启后能够恢复为 `deleted` 或 `present`。
 
 ### 19.3 真实 ZOS 集成测试
 
@@ -1026,6 +1124,9 @@ enable_bucket_metrics
 - 校验 ZOS 对象、Content-Type、大小、对象 Key、URL 和任务记录一致。
 - 从第三方公网环境实际访问返回 URL。
 - 验证 `HeadObject` 恢复逻辑。
+- 验证非版本化 Bucket 的 Key 删除和删除后 404。
+- Bucket 启用版本控制时，验证只删除上传时记录的精确 VersionId，不误删更新版本。
+- 删除前外部替换对象时返回 `OBJECT_CHANGED`。
 - 开启扩展统计时验证 Bucket Statistics 和 Storage Info。
 - 使用控制台中记录的 Endpoint、Bucket 外网访问域名、AK 和 SK 完成 Dashboard 首次配置。
 - “测试连接”能够识别正确配置、错误 Endpoint、错误 AK/SK 和不可访问 Bucket。
@@ -1049,6 +1150,8 @@ enable_bucket_metrics
 - 服务不在请求结束后保留文件本体。
 - 上传成功与数据库状态具有可恢复的一致性。
 - 调用方可以通过幂等键避免网络超时后的重复对象。
+- 新上传对象可以凭任务级删除凭证严格、幂等地删除，并保留数据库审计记录。
+- 删除目标只能由任务及原 storage config 定位，调用方不能指定 Bucket、Key 或 VersionId。
 - 任务列表和任务详情支持故障排查。
 - Dashboard 显示上传流量、任务状态、服务状态和近期任务。
 - Dashboard 显示并筛选 `NOTIFY` 及以上日志。
@@ -1061,7 +1164,7 @@ enable_bucket_metrics
 
 ## 21. 实施顺序
 
-1. `[已完成]` 根据本文同步更新 `API.md`，冻结 v1 接口字段和错误码。
+1. `[已完成]` 根据本文同步更新 `API.md` v2 删除接口、字段和错误码。
 2. 验证标准 S3 Client 的 Client 创建、Head Bucket、上传、multipart、Content-Type、Head Object 和 URL 生成。
 3. 实现 Storage Provider registry、`ctyun_zos` adapter 和 provider preset 描述。
 4. 建立 Provider 通用的 `storage_configs` envelope、`upload_tasks`、`service_logs` schema、索引、WAL 参数和轻量 schema version。
@@ -1075,6 +1178,7 @@ enable_bucket_metrics
 12. 实现 Dashboard 统计 API、可选 Provider 统计缓存、监控页面和设置页面。
 13. 完成自动测试、故障注入和真实 ZOS 集成测试。
 14. 以单容器部署到局域网，配置持久化目录、临时目录、加密主密钥、生命周期规则和数据库备份。
+15. 升级 schema v2，扩展对象元数据和删除状态，实现签名删除凭证、Provider 删除、恢复与严格测试。
 
 ## 22. 已确认决策
 
@@ -1100,7 +1204,12 @@ enable_bucket_metrics
 20. ZOS Bucket Statistics 和 Storage Info 为可选补充指标。
 21. `NOTIFY=25`，Dashboard 持久化并显示 `NOTIFY` 及以上日志。
 22. 日志默认保留 30 天或最多 100000 条，任务默认保留 180 天。
-23. 服务不提供对象下载、删除、更新、列表或 Bucket 权限管理能力。
+23. 服务不提供对象下载、更新、列表或 Bucket 权限管理能力。
+24. 删除只面向本服务新上传且元数据完整的对象；目标由任务数据库定位，调用方不能传入任意 Bucket、Key 或 VersionId。
+25. 删除必须同时提供任务 ID 和对象级 `delete_token`；明文 token 只返回一次，数据库只存哈希，token 不进入查询接口、Dashboard、日志或 URL。
+26. 上传成功后通过 `HeadObject` 保存大小、ETag 和可选 VersionId；版本化 Bucket 删除精确版本。
+27. 删除不移除任务记录；状态、错误和删除时间永久留在 SQLite 中。
+28. v1 历史成功任务迁移为 `legacy_unverified`，默认不开放 API 删除。
 
 ## 23. `API.md` 同步状态
 
@@ -1120,6 +1229,11 @@ enable_bucket_metrics
 - [x] 增加 `UPLOAD_CAPACITY_EXCEEDED`、`UPLOAD_IN_PROGRESS`、`IDEMPOTENCY_KEY_REUSED`、`TASK_NOT_FOUND` 和 `NOT_READY` 等错误码。
 - [x] 更新重启恢复和重试语义。
 - [x] 保留现有上传成功响应中的 `task_id`、`key` 和 `url`。
+- [x] 首次上传成功响应增加大小、Content-Type、ETag、可选 VersionId 和一次性返回的对象级 `delete_token`。
+- [x] 增加 `DELETE /v1/upload-tasks/{task_id}/object`，禁止调用方指定删除目标。
+- [x] 增加对象删除状态、严格元数据校验、精确版本删除、幂等和不确定结果恢复语义。
+- [x] 增加 `DELETE_TOKEN_INVALID`、`OBJECT_NOT_DELETABLE`、`OBJECT_CHANGED`、`DELETE_IN_PROGRESS` 和 `DELETE_FAILED`。
+- [x] 明确历史 `legacy_unverified` 任务默认不可删除。
 
 ## 24. 参考资料
 

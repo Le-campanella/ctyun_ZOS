@@ -1,10 +1,10 @@
-# 局域网轻量文件上传服务接口文档（ZOS v1）
+# 局域网轻量文件上传服务接口文档（ZOS v2）
 
 > 面向对象：局域网内调用本服务的其他服务、接入 Agent，以及包含监控与存储设置功能的 Dashboard。
 >
-> API 版本：`v1`（实施中）
+> 接口文档修订：`v2`（删除能力设计已确认，待实现）；HTTP 路径命名空间继续使用 `/v1`，本次只增加响应字段和新接口，不破坏现有调用方。
 >
-> 同步基线：`PLAN.md` v4
+> 同步基线：`PLAN.md` v5
 
 ## 1. 能力范围
 
@@ -19,15 +19,17 @@
 7. 提供同源、无登录的 Web Dashboard，其中监控区域只读，设置页面可以测试和激活存储配置。
 8. 提供 Provider preset、当前设置、连接测试和配置 revision API。
 9. 提供不会上传对象存储、不会创建任务记录的局域网文件接收测试。
+10. 使用上传成功时返回的对象级删除凭证，严格删除该任务创建的对象并保留审计记录。
 
-服务记录上传过程、任务结果、存储配置 revision、统计和运行日志。对象的下载、更新、删除、重命名、列表和 Bucket 权限管理由其他系统或对象存储配置负责。上传调用方 API 保持 Provider 无关。
+服务记录上传过程、任务结果、对象元数据、删除结果、存储配置 revision、统计和运行日志。对象的下载、更新、重命名、列表和 Bucket 权限管理由其他系统或对象存储配置负责。上传与删除调用方 API 保持 Provider 无关。
 
 ## 2. 网络与访问约定
 
 - 示例地址：`http://zos-upload-service:8000`
 - 服务仅部署在受控局域网地址或内部容器网络。
 - API 与 Dashboard 共用同一个局域网端口。
-- 服务不设置调用方认证、登录、用户、角色或权限系统。
+- 服务不设置统一调用方认证、登录、用户、角色或权限系统。
+- 删除是破坏性操作，除受控局域网边界外还必须提供上传成功响应中的任务级 `delete_token`。
 - 防火墙、VLAN、容器网络和端口暴露规则构成访问边界。
 - 部署配置关闭公网入口、端口转发和公有负载均衡器。
 - CORS 默认关闭，Dashboard 通过同源请求读写数据。
@@ -35,6 +37,7 @@
 - 设置 API 不设身份认证。局域网内能够访问服务端口的客户端均可修改 active storage config。
 - 设置写请求只接受 JSON，并要求自定义 Header `X-Settings-Request: true`，用于降低浏览器跨站误提交风险。
 - 设置请求会传输 AK/SK。正式部署应通过内网 HTTPS 暴露 Dashboard 与设置 API，或将其限制在隔离的管理 VLAN / 管理主机；使用 HTTP 时，能够监听局域网流量的设备也属于信任边界。服务仍保持无身份认证。
+- `delete_token` 是持有者凭证，正式部署必须使用内网 HTTPS；反向代理、APM 和访问日志不得记录 `X-Delete-Token`。
 
 ## 3. 通用协议约定
 
@@ -116,6 +119,8 @@ X-Settings-Request: true
 - GET 设置接口只返回 masked AK 和凭证是否已配置。
 - 设置客户端使用 `provider_schema_version` 绑定 Provider 专属设置结构。
 - Dashboard 不把凭证写入 LocalStorage、SessionStorage、URL、日志或错误对象；保存或测试完成后立即清空输入值。
+- `delete_token` 不属于存储凭证，但按密码处理：只在首次上传成功的 `201` 中返回一次，不出现在幂等重放、任务查询、Dashboard、日志、错误对象或 URL 中。
+- 调用方不得把 `delete_token` 发送给本服务之外的公网 API，也不得用它作为业务对象 ID。
 
 ## 4. 上传文件
 
@@ -184,7 +189,12 @@ X-Request-ID: 82d1f9d8-...
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
-  "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf"
+  "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
+  "size_bytes": 125678,
+  "content_type": "application/pdf",
+  "etag": "\"opaque-etag\"",
+  "version_id": null,
+  "delete_token": "opaque-object-delete-capability"
 }
 ```
 
@@ -193,14 +203,22 @@ X-Request-ID: 82d1f9d8-...
 | `task_id` | string | 上传任务 UUID |
 | `key` | string | 对象存储中的对象 Key |
 | `url` | string | 对象对应的完整公网 URL |
+| `size_bytes` | integer | `HeadObject` 确认的对象大小 |
+| `content_type` | string | 上传到对象存储的 Content-Type |
+| `etag` | string | Provider 返回的不透明对象 ETag；不得假设为 MD5 |
+| `version_id` | string 或 null | 对象版本 ID；Bucket 未启用或 Provider 不支持版本控制时为 null |
+| `delete_token` | string | 只允许删除本任务对象的敏感持有者凭证；仅首次 `201` 返回 |
 
 收到 `201` 表示：
 
 1. S3 Transfer Manager 已确认上传成功。
-2. SQLite 任务状态已更新为 `succeeded`。
-3. `size_bytes`、`finished_at` 和 `duration_ms` 已完成持久化。
+2. `HeadObject` 已确认对象大小，并取得 ETag 和可选 VersionId。
+3. SQLite 上传状态已更新为 `succeeded`，对象状态已更新为 `present`。
+4. `size_bytes`、对象元数据、`finished_at` 和 `duration_ms` 已完成持久化。
 
-调用方应直接保存和使用 `url`，并把它视为不透明字符串。服务上传时请求 `public-read` 对象 ACL；Bucket Policy、账号权限或 ZOS 侧安全策略仍可能阻止匿名访问。
+调用方应直接保存和使用 `url`，并把它视为不透明字符串。调用方需要未来删除对象时，还必须安全保存 `task_id` 和 `delete_token`。服务上传时请求 `public-read` 对象 ACL；Bucket Policy、账号权限或 ZOS 侧安全策略仍可能阻止匿名访问。
+
+响应不会返回 Bucket、Endpoint、AK/SK、`storage_config_id`、SDK 原始响应、请求签名或内部诊断 Header。
 
 ### 4.4 幂等重放成功
 
@@ -213,19 +231,25 @@ X-Request-ID: current-request-id
 Idempotency-Replayed: true
 ```
 
-响应体与首次成功响应保持一致：
+响应体的任务和对象字段与首次成功响应一致，但不会补发删除凭证：
 
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
-  "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf"
+  "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
+  "size_bytes": 125678,
+  "content_type": "application/pdf",
+  "etag": "\"opaque-etag\"",
+  "version_id": null,
+  "delete_token": null
 }
 ```
 
 说明：
 
-- 返回的是原任务、原对象 Key 和原 URL。
+- 返回的是原任务和原对象元数据。
+- `delete_token` 固定为 `null`，不会通过幂等重放补发；`Idempotency-Key` 不是认证凭证。
 - 本次响应头中的 `X-Request-ID` 对应当前重放请求。
 - 原任务中的 `request_id` 保持首次创建任务时的值。
 - 重放不会创建任务，也不会重复计入上传流量。
@@ -342,6 +366,12 @@ Host: zos-upload-service:8000
       "public_url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
       "status": "succeeded",
       "size_bytes": 125678,
+      "etag": "\"opaque-etag\"",
+      "version_id": null,
+      "object_status": "present",
+      "delete_error_code": null,
+      "delete_started_at": null,
+      "deleted_at": null,
       "error_code": null,
       "created_at": "2026-07-29T06:30:00Z",
       "finished_at": "2026-07-29T06:30:02Z",
@@ -358,6 +388,12 @@ Host: zos-upload-service:8000
       "public_url": null,
       "status": "unknown",
       "size_bytes": 10485760,
+      "etag": null,
+      "version_id": null,
+      "object_status": "pending",
+      "delete_error_code": null,
+      "delete_started_at": null,
+      "deleted_at": null,
       "error_code": "RECOVERY_PENDING",
       "created_at": "2026-07-29T06:20:00Z",
       "finished_at": null,
@@ -383,12 +419,18 @@ Host: zos-upload-service:8000
 | `public_url` | string 或 null | `succeeded` 时的公网 URL |
 | `status` | string | `uploading`、`unknown`、`succeeded`、`failed` |
 | `size_bytes` | integer 或 null | 已确认的文件大小 |
+| `etag` | string 或 null | 对象 ETag；不透明字符串，不保证是 MD5 |
+| `version_id` | string 或 null | 上传对象的精确版本 ID |
+| `object_status` | string | `pending`、`present`、`absent`、`legacy_unverified`、`deleting`、`deleted` 或 `delete_unknown` |
+| `delete_error_code` | string 或 null | 最近一次删除失败或不确定结果的稳定错误码 |
+| `delete_started_at` | string 或 null | 最近一次删除开始时间 |
+| `deleted_at` | string 或 null | 服务确认对象或精确版本不存在的时间 |
 | `error_code` | string 或 null | 当前错误或恢复状态码 |
 | `created_at` | string | UTC 创建时间 |
 | `finished_at` | string 或 null | 终态完成时间 |
 | `duration_ms` | integer 或 null | 完整请求处理耗时；中断时可能为空 |
 
-调用方持续增加 `offset`，直到 `items` 为空。
+调用方持续增加 `offset`，直到 `items` 为空。列表永远不返回 `delete_token`。
 
 ## 6. 查询单个上传任务
 
@@ -414,6 +456,12 @@ Host: zos-upload-service:8000
   "public_url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
   "status": "succeeded",
   "size_bytes": 125678,
+  "etag": "\"opaque-etag\"",
+  "version_id": null,
+  "object_status": "present",
+  "delete_error_code": null,
+  "delete_started_at": null,
+  "deleted_at": null,
   "error_code": null,
   "created_at": "2026-07-29T06:30:00Z",
   "finished_at": "2026-07-29T06:30:02Z",
@@ -432,9 +480,120 @@ Host: zos-upload-service:8000
 - 非法 UUID 返回 `400 BAD_REQUEST`。
 - 格式正确但任务不存在时返回 `404 TASK_NOT_FOUND`。
 
-## 7. 健康检查
+单任务详情同样不返回 `delete_token`。
 
-### 7.1 进程健康
+## 7. 删除已上传对象
+
+### 7.1 请求
+
+```http
+DELETE /v1/upload-tasks/550e8400-e29b-41d4-a716-446655440000/object HTTP/1.1
+Host: zos-upload-service:8000
+X-Delete-Token: opaque-object-delete-capability
+X-Request-ID: optional-request-id
+```
+
+规则：
+
+- `task_id` 必须是合法 UUID。
+- `X-Delete-Token` 必填，最大 256 个可见 ASCII 字符，必须与该任务首次上传成功时返回的 token 匹配。
+- 请求没有 JSON body，不接受 Bucket、对象 Key、URL、Provider、Endpoint 或 VersionId。
+- 删除目标只由服务端任务记录和任务绑定的原 storage config revision 决定。
+- 服务对提交 token 计算 SHA-256，并与任务保存的哈希执行常量时间比较。缺失、格式错误、篡改或跨任务使用统一返回 `403 DELETE_TOKEN_INVALID`。
+- 只有上传状态为 `succeeded` 且对象状态为 `present` 的任务可以开始删除。
+- `legacy_unverified` 历史任务默认没有可用删除凭证，也不可删除。
+
+### 7.2 严格删除流程
+
+1. 服务在 SQLite 中以条件更新执行 `present → deleting`，防止并发删除。
+2. 使用任务保存的 `storage_config_id` 创建原 Provider Client，不使用当前 active 配置。
+3. 调用 `HeadObject`，比较数据库保存的对象大小、ETag 和可选 VersionId。
+4. 任一元数据不一致时不删除，恢复为 `present` 并返回 `409 OBJECT_CHANGED`。
+5. 有 VersionId 时删除精确版本；否则删除保存的对象 Key。
+6. 删除后再次查询相同 Key 或精确 VersionId。
+7. 只有 Provider 明确返回不存在时，才更新为 `deleted` 并返回成功。
+
+调用方提供的 token 只授权删除与其签名绑定的任务对象，不能用于删除其他任务，也不能构造任意 Key。
+
+### 7.3 首次删除成功
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-ID: 82d1f9d8-...
+```
+
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
+  "object_status": "deleted",
+  "deleted_at": "2026-07-31T08:00:00Z",
+  "already_deleted": false,
+  "already_absent": false
+}
+```
+
+成功只表示 ZOS 源对象或记录的精确版本已经确认不存在。CDN、反向代理、浏览器或第三方服务缓存可能继续提供旧内容，缓存失效不属于本接口的成功条件。
+
+### 7.4 重复删除
+
+数据库已记录为 `deleted` 时，不再请求 Provider，直接返回：
+
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
+  "object_status": "deleted",
+  "deleted_at": "2026-07-31T08:00:00Z",
+  "already_deleted": true,
+  "already_absent": false
+}
+```
+
+删除前 `HeadObject` 已经明确返回目标不存在时，服务记录审计结果并返回 `already_absent=true`。任务记录本身不会删除。
+
+### 7.5 删除结果不确定
+
+Provider 删除调用超时、连接中断或返回无法确认的服务端错误时：
+
+```http
+HTTP/1.1 202 Accepted
+Content-Type: application/json
+```
+
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
+  "object_status": "delete_unknown",
+  "error": {
+    "code": "DELETE_PENDING",
+    "message": "删除结果暂时无法确认",
+    "request_id": "82d1f9d8-..."
+  }
+}
+```
+
+调用方不得把 `202` 当作删除成功。服务恢复器会继续查询目标：确认不存在时转为 `deleted`；确认原对象仍存在时转回 `present`；仍无法确认时保持 `delete_unknown`。调用方通过任务详情查询最终状态。
+
+### 7.6 删除错误
+
+| HTTP | `code` | 场景 |
+|---:|---|---|
+| 400 | `BAD_REQUEST` | `task_id` 或 Header 格式不合法 |
+| 403 | `DELETE_TOKEN_INVALID` | 删除凭证缺失、错误或与任务不匹配 |
+| 404 | `TASK_NOT_FOUND` | 任务不存在 |
+| 409 | `OBJECT_NOT_DELETABLE` | 上传或对象状态不允许删除，或历史元数据未验证 |
+| 409 | `OBJECT_CHANGED` | 删除前大小、ETag 或 VersionId 与上传记录不一致 |
+| 409 | `DELETE_IN_PROGRESS` | 对象正在删除或等待恢复确认 |
+| 500 | `DATABASE_ERROR` | 删除状态无法安全写入 SQLite |
+| 502 | `DELETE_FAILED` | Provider 明确拒绝删除 |
+| 503 | `STORAGE_CONFIG_UNAVAILABLE` | 任务原配置无法加载、解密或对应 Provider 已不可用 |
+
+## 8. 健康检查
+
+### 8.1 进程健康
 
 ```http
 GET /healthz HTTP/1.1
@@ -454,7 +613,7 @@ Content-Type: application/json
 
 该接口只表示服务进程可以响应，不访问 SQLite、临时目录或 Storage Provider。
 
-### 7.2 服务就绪
+### 8.2 服务就绪
 
 ```http
 GET /readyz HTTP/1.1
@@ -573,9 +732,9 @@ HTTP/1.1 503 Service Unavailable
 
 `/readyz` 用于编排平台就绪检查。上传调用方在收到 `503 NOT_READY` 或 `503 STORAGE_NOT_CONFIGURED` 时应延迟重试。
 
-## 8. Web Dashboard 页面
+## 9. Web Dashboard 页面
 
-### 8.1 监控页面
+### 9.1 监控页面
 
 ```http
 GET /dashboard HTTP/1.1
@@ -600,7 +759,7 @@ Content-Type: text/html; charset=utf-8
 
 页面展示局域网文件接收测试、服务状态、active Provider 与 revision、上传概览、上传流量图、近期上传任务和 `NOTIFY` 及以上日志。接收测试的“真实上传到 ZOS”开关默认关闭；开启后页面改为调用正式 `/v1/uploads`，因此会创建任务并返回对象 Key 与公网 URL。
 
-### 8.2 存储设置页面
+### 9.2 存储设置页面
 
 ```http
 GET /dashboard/settings HTTP/1.1
@@ -617,11 +776,11 @@ Host: zos-upload-service:8000
 
 AK/SK 输入框使用密码类型并关闭自动填充，页面加载时不回填原值，浏览器本地存储中不保存凭证。测试或保存完成后清空输入值。局域网内能够访问该页面和设置 API 的客户端均可修改配置。
 
-## 9. Dashboard 存储设置
+## 10. Dashboard 存储设置
 
 设置 API 采用稳定的 `provider + provider_schema_version + config + credentials` envelope。第一版只实现 `ctyun_zos`；未来增加其他对象存储时，可以增加新的 Provider adapter、preset 和 schema，上传 API 保持不变。
 
-### 9.1 查询 Provider 预设
+### 10.1 查询 Provider 预设
 
 ```http
 GET /v1/settings/storage/providers HTTP/1.1
@@ -713,7 +872,7 @@ Host: zos-upload-service:8000
 
 Dashboard 使用该接口渲染 Provider 设置表单。`items[].schema_version` 在测试和保存请求中作为 `provider_schema_version` 提交。`label`、`hint` 和 `suggested_value_template` 仅用于界面展示，服务端仍按 Provider schema 校验实际值。调用方应忽略未知 Provider 和未知字段。
 
-### 9.2 查询当前设置
+### 10.2 查询当前设置
 
 ```http
 GET /v1/settings/storage HTTP/1.1
@@ -773,7 +932,7 @@ Host: zos-upload-service:8000
 
 响应不会包含 AK、SK 明文或密文。
 
-### 9.3 ZOS 设置字段
+### 10.3 ZOS 设置字段
 
 设置 envelope 的 `provider_schema_version` 对 `ctyun_zos` 第一版固定为 `1`。`ctyun_zos` 的完整 `config`：
 
@@ -799,7 +958,7 @@ Host: zos-upload-service:8000
 
 天翼云 Bucket 外网访问域名通常采用 `协议://BucketName.Endpoint`。服务仍要求显式保存 `public_base_url`，以兼容内网 Endpoint、CDN 和自定义域名。
 
-### 9.4 测试候选设置
+### 10.4 测试候选设置
 
 ```http
 POST /v1/settings/storage/test HTTP/1.1
@@ -892,7 +1051,7 @@ HTTP/1.1 502 Bad Gateway
 }
 ```
 
-### 9.5 保存并激活设置
+### 10.5 保存并激活设置
 
 ```http
 PUT /v1/settings/storage HTTP/1.1
@@ -974,7 +1133,7 @@ X-Settings-Request: true
 
 测试、加密、数据库事务或 Client 切换失败时，旧 active revision 保持有效。历史 revision 不通过本 API 删除。
 
-### 9.6 设置错误码
+### 10.6 设置错误码
 
 | HTTP | `code` | 说明 |
 |---:|---|---|
@@ -989,9 +1148,9 @@ X-Settings-Request: true
 
 设置错误响应不会回显候选 AK/SK，也不会把 SDK 原始请求签名写入 `message` 或诊断字段。
 
-## 10. Dashboard 上传概览
+## 11. Dashboard 上传概览
 
-### 10.1 请求
+### 11.1 请求
 
 ```http
 GET /v1/dashboard/summary?from=2026-07-28T06%3A30%3A00Z&to=2026-07-29T06%3A30%3A00Z HTTP/1.1
@@ -1010,7 +1169,7 @@ Host: zos-upload-service:8000
 - ZOS 探测失败会把服务状态标记为 `degraded` 或 `not_ready`，本地统计仍可返回。
 - SQLite 查询失败返回 `500 DATABASE_ERROR`。
 
-### 10.2 成功响应
+### 11.2 成功响应
 
 ```json
 {
@@ -1084,10 +1243,11 @@ Host: zos-upload-service:8000
 - P95 使用 nearest-rank：对耗时升序排列，取 `ceil(0.95 × n)` 对应值。
 - 范围筛选和统计分桶均依据任务 `created_at`。
 - 幂等重放不创建任务，因此不增加任何统计值。
+- 对象后续删除不改变历史上传成功率、成功任务数或上传字节统计。
 
-## 11. Dashboard 上传流量时间序列
+## 12. Dashboard 上传流量时间序列
 
-### 11.1 请求
+### 12.1 请求
 
 ```http
 GET /v1/dashboard/traffic?from=2026-07-22T00%3A00%3A00Z&to=2026-07-29T00%3A00%3A00Z&interval=day HTTP/1.1
@@ -1108,7 +1268,7 @@ Host: zos-upload-service:8000
 - 响应包含范围内的全部桶，空桶返回零值。
 - 每个任务按 `created_at` 所在桶计数。
 
-### 11.2 成功响应
+### 12.2 成功响应
 
 ```json
 {
@@ -1144,9 +1304,9 @@ Host: zos-upload-service:8000
 }
 ```
 
-## 12. Dashboard 运行日志
+## 13. Dashboard 运行日志
 
-### 12.1 日志级别
+### 13.1 日志级别
 
 Dashboard 可查询以下级别：
 
@@ -1159,7 +1319,7 @@ Dashboard 可查询以下级别：
 
 `NOTIFY` 位于标准 `INFO` 和 `WARNING` 之间。SQLite 只持久化 `NOTIFY` 及以上日志。
 
-### 12.2 请求
+### 13.2 请求
 
 ```http
 GET /v1/dashboard/logs?min_level=NOTIFY&limit=100&before_id=1200&event=upload_failed&request_id=example-001&task_id=550e8400-e29b-41d4-a716-446655440000&error_code=STORAGE_TIMEOUT&from=2026-07-28T00%3A00%3A00Z&to=2026-07-29T00%3A00%3A00Z HTTP/1.1
@@ -1180,7 +1340,7 @@ Host: zos-upload-service:8000
 
 排序固定为 `id DESC`。`before_id` 用于加载更早日志，避免 offset 在持续写入时产生重复或遗漏。
 
-### 12.3 成功响应
+### 13.3 成功响应
 
 ```json
 {
@@ -1219,9 +1379,9 @@ Host: zos-upload-service:8000
 
 默认保留策略为 30 天或最多 100000 条，以先达到的限制为准。
 
-## 13. Dashboard 可选 Storage Provider 原生指标
+## 14. Dashboard 可选 Storage Provider 原生指标
 
-### 13.1 请求
+### 14.1 请求
 
 ```http
 GET /v1/dashboard/storage?from=2026-07-28T00%3A00%3A00Z&to=2026-07-29T00%3A00%3A00Z HTTP/1.1
@@ -1242,7 +1402,7 @@ Host: zos-upload-service:8000
 - Provider 原生指标属于整个 Bucket，可能包含绕过本服务写入或读取的对象和请求。
 - Dashboard 的本服务上传流量以 SQLite 统计为准。
 
-### 13.2 功能关闭
+### 14.2 功能关闭
 
 ```http
 HTTP/1.1 200 OK
@@ -1265,7 +1425,7 @@ HTTP/1.1 200 OK
 }
 ```
 
-### 13.3 成功响应
+### 14.3 成功响应
 
 ```json
 {
@@ -1349,7 +1509,7 @@ HTTP/1.1 200 OK
 }
 ```
 
-### 13.4 指标暂时不可用
+### 14.4 指标暂时不可用
 
 已有缓存数据时，服务返回 `200`、`status="degraded"` 和最后一次成功数据：
 
@@ -1396,9 +1556,9 @@ HTTP/1.1 503 Service Unavailable
 
 该故障不会阻塞上传、任务查询、本地统计或日志查询。Provider 为 `ctyun_zos` 时，响应中的统计字段采用本节定义的 ZOS schema。
 
-## 14. 任务状态与恢复语义
+## 15. 任务状态与恢复语义
 
-### 14.1 状态定义
+### 15.1 状态定义
 
 | 状态 | 含义 | 是否终态 |
 |---|---|---|
@@ -1421,20 +1581,44 @@ uploading ──确认成功──────────────> succeede
                                       └──超时或 5xx─────────> unknown
 ```
 
-### 14.2 启动和周期恢复
+对象状态独立于上传状态：
+
+| `object_status` | 含义 |
+|---|---|
+| `pending` | 尚未确认对象是否存在或元数据不完整 |
+| `present` | 已确认对象存在，且大小、ETag 和可选 VersionId 已持久化 |
+| `absent` | 已确认上传没有产生对象 |
+| `legacy_unverified` | v1 历史成功任务，缺少严格删除所需元数据或删除凭证 |
+| `deleting` | 删除请求正在调用 Provider |
+| `deleted` | 已确认对象 Key 或精确版本不存在 |
+| `delete_unknown` | 删除调用结果无法确认，等待恢复 |
+
+```text
+present ──开始删除──> deleting
+   │                    ├──确认不存在──> deleted
+   │                    ├──明确仍存在──> present
+   │                    └──结果未知────> delete_unknown
+   │                                         ├──确认不存在──> deleted
+   │                                         ├──确认仍存在──> present
+   │                                         └──仍无法确认──> delete_unknown
+   └──元数据变化──> present + OBJECT_CHANGED
+```
+
+### 15.2 启动和周期恢复
 
 服务启动时扫描 `uploading` 和 `unknown` 任务。每个任务使用创建时绑定的 storage config revision；`ctyun_zos` adapter 通过对应 Endpoint、Bucket 和凭证执行恢复：
 
-- `HeadObject` 确认对象存在：更新为 `succeeded`，并写入对象大小和既有 URL。
+- `HeadObject` 确认对象存在：更新为 `succeeded` 和 `present`，并写入对象大小、ETag、可选 VersionId 和既有 URL。
 - Storage Provider 明确返回对象不存在；`ctyun_zos` 为 `404 NoSuchKey`：更新为 `failed`，`error_code=SERVICE_RESTARTED_OBJECT_NOT_FOUND`。
 - Storage Provider 超时、网络异常或 5xx：保持或更新为 `unknown`，`error_code=RECOVERY_PENDING`。
 - 周期恢复默认每 60 秒重试 `unknown` 和超过陈旧阈值的 `uploading` 任务。
+- 周期恢复同时扫描 `delete_unknown` 和超过删除陈旧阈值的 `deleting` 任务；确认目标不存在时更新为 `deleted`，确认原对象仍存在时恢复为 `present`。
 
 旧 revision 的凭证失效且当前 active revision 指向同一 Provider、Endpoint 和 Bucket 时，恢复器可以使用 active revision 再尝试一次。
 
-正常上传以 Provider 上传方法的成功返回作为确认；`HeadObject` 专用于异常恢复和运维诊断。
+正常上传在 Provider 上传方法成功返回后执行 `HeadObject`，取得严格删除所需元数据后才返回 `201` 和 `delete_token`。
 
-### 14.3 任务级错误码
+### 15.3 任务级错误码
 
 以下错误码可能出现在任务的 `error_code` 字段中：
 
@@ -1452,9 +1636,18 @@ uploading ──确认成功──────────────> succeede
 
 `CLIENT_DISCONNECTED` 场景通常无法向已经断开的客户端返回 HTTP 响应，调用方可通过任务查询和日志查看结果。
 
-## 15. 幂等与重试语义
+删除相关错误保存在 `delete_error_code`，不覆盖原上传 `error_code`：
 
-### 15.1 幂等键格式
+| `delete_error_code` | 含义 |
+|---|---|
+| `OBJECT_CHANGED` | 删除前元数据与上传记录不一致 |
+| `DELETE_FAILED` | Provider 明确拒绝删除 |
+| `DELETE_PENDING` | 删除结果无法确认，等待恢复 |
+| `STORAGE_CONFIG_UNAVAILABLE` | 任务原 storage config 无法加载 |
+
+## 16. 幂等与重试语义
+
+### 16.1 幂等键格式
 
 ```http
 Idempotency-Key: opaque-key-up-to-128-chars
@@ -1469,22 +1662,22 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - 幂等保证持续到对应任务记录被保留策略删除，默认最长保留 180 天。
 - 幂等键绑定第一次请求意图，服务不读取完整文件来比较重复请求内容。
 
-### 15.2 各状态行为
+### 16.2 各状态行为
 
 | 已有任务状态 | HTTP | 行为 |
 |---|---:|---|
-| `succeeded` | 200 | 返回原任务结果，`Idempotency-Replayed: true` |
+| `succeeded` | 200 | 返回原任务和对象元数据，`delete_token=null`，`Idempotency-Replayed: true` |
 | `uploading` | 409 | `UPLOAD_IN_PROGRESS`，返回已有 `task_id` |
 | `unknown` | 409 | `UPLOAD_IN_PROGRESS`，返回已有 `task_id` |
 | `failed` | 409 | `IDEMPOTENCY_KEY_REUSED`，返回已有 `task_id` |
 
 失败任务需要新的幂等键才能发起新的上传。
 
-### 15.3 未传幂等键
+### 16.3 未传幂等键
 
 每次 `POST /v1/uploads` 都会生成新的任务 UUID 和对象 Key。同一个文件重复上传会产生不同任务和 URL。
 
-### 15.4 调用方重试建议
+### 16.4 调用方重试建议
 
 - 收到 `201` 或幂等重放 `200`：保存结果，停止重试。
 - 收到 `409 UPLOAD_IN_PROGRESS`：查询返回的 `task_id`，等待任务进入终态。
@@ -1492,8 +1685,11 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - 收到 `503 UPLOAD_CAPACITY_EXCEEDED`：遵循 `Retry-After`。
 - 客户端等待响应时发生网络超时：使用相同幂等键重新请求，或先查询已知 `task_id`。
 - 未使用幂等键的自动重试会产生重复对象风险。
+- 首次 `201` 响应丢失时，幂等重放可以恢复 URL 和对象元数据，但不能恢复删除凭证；在统一内部认证或受控管理恢复能力实现前，该对象不能通过公开删除 API 删除。
+- 删除接口按任务状态天然幂等，不使用 `Idempotency-Key`；网络超时后使用相同任务 ID 和 `delete_token` 重试或查询任务详情。
+- 删除返回 `202 DELETE_PENDING` 时停止主动重试 Provider 调用，轮询任务详情等待 `object_status` 变为 `deleted` 或 `present`。
 
-## 16. HTTP 错误码总表
+## 17. HTTP 错误码总表
 
 | HTTP | `code` | 说明 |
 |---:|---|---|
@@ -1502,27 +1698,35 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 400 | `BAD_REQUEST` | 请求头、multipart、UUID、时间或查询参数错误 |
 | 400 | `STORAGE_CONFIG_INVALID` | Provider、schema version、设置字段、URL、Bucket、凭证格式或参数不合法 |
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/schema version/Endpoint 变化时缺少完整 AK/SK |
+| 403 | `DELETE_TOKEN_INVALID` | 删除凭证缺失、错误或与任务不匹配 |
 | 404 | `TASK_NOT_FOUND` | 指定任务不存在 |
 | 409 | `CONFIG_REVISION_CONFLICT` | 设置更新基于过期 revision |
 | 409 | `UPLOAD_IN_PROGRESS` | 幂等键对应任务仍在处理或待确认 |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | 幂等键已经绑定失败任务 |
+| 409 | `OBJECT_NOT_DELETABLE` | 任务或对象状态不允许严格删除 |
+| 409 | `OBJECT_CHANGED` | 删除前对象元数据与上传记录不一致 |
+| 409 | `DELETE_IN_PROGRESS` | 对象正在删除或等待确认 |
 | 413 | `FILE_TOO_LARGE` | 文件或请求体超过上限 |
 | 500 | `DATABASE_ERROR` | SQLite 创建、读取或更新失败 |
 | 500 | `SETTINGS_STORAGE_ERROR` | 设置加密、持久化或 Client 切换失败 |
 | 500 | `INTERNAL_ERROR` | 未分类服务异常 |
 | 502 | `UPLOAD_FAILED` | Storage Provider 明确拒绝或上传失败 |
 | 502 | `STORAGE_TIMEOUT` | Storage Provider 请求超时 |
+| 502 | `DELETE_FAILED` | Storage Provider 明确拒绝删除 |
 | 502 | `STORAGE_ENDPOINT_UNREACHABLE` | 设置测试无法连接 Endpoint |
 | 502 | `STORAGE_CREDENTIALS_REJECTED` | 设置测试中的 AK/SK 被拒绝 |
 | 502 | `STORAGE_BUCKET_UNAVAILABLE` | 设置测试无法访问 Bucket |
 | 503 | `UPLOAD_CAPACITY_EXCEEDED` | 上传并发槽位已满 |
 | 503 | `STORAGE_NOT_CONFIGURED` | 尚未激活存储配置 |
+| 503 | `STORAGE_CONFIG_UNAVAILABLE` | 删除任务绑定的原配置无法加载或解密 |
 | 503 | `NOT_READY` | 服务依赖项未达到就绪条件 |
 | 503 | `STORAGE_METRICS_UNAVAILABLE` | 可选 Storage Provider 原生指标暂时不可用且无缓存 |
 
-## 17. 调用示例
+`202 DELETE_PENDING` 是已接受但结果不确定的删除状态，不属于成功响应，也不放入 4xx/5xx 错误表。
 
-### 17.1 带幂等键上传
+## 18. 调用示例
+
+### 18.1 带幂等键上传
 
 ```bash
 curl --fail-with-body \
@@ -1533,56 +1737,66 @@ curl --fail-with-body \
   http://zos-upload-service:8000/v1/uploads
 ```
 
-### 17.2 查询任务列表
+### 18.2 查询任务列表
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/upload-tasks?limit=50&offset=0&status=succeeded'
 ```
 
-### 17.3 查询任务详情
+### 18.3 查询任务详情
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/upload-tasks/550e8400-e29b-41d4-a716-446655440000'
 ```
 
-### 17.4 查询就绪状态
+### 18.4 删除上传对象
+
+```bash
+curl --fail-with-body \
+  -X DELETE \
+  -H 'X-Request-ID: delete-example-001' \
+  -H 'X-Delete-Token: <上传成功响应中的 delete_token>' \
+  'http://zos-upload-service:8000/v1/upload-tasks/550e8400-e29b-41d4-a716-446655440000/object'
+```
+
+### 18.5 查询就绪状态
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/readyz'
 ```
 
-### 17.5 查询 24 小时上传概览
+### 18.6 查询 24 小时上传概览
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/dashboard/summary'
 ```
 
-### 17.6 查询按小时流量
+### 18.7 查询按小时流量
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/dashboard/traffic?interval=hour'
 ```
 
-### 17.7 查询 ERROR 及以上日志
+### 18.8 查询 ERROR 及以上日志
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/dashboard/logs?min_level=ERROR&limit=100'
 ```
 
-### 17.8 查询当前存储设置
+### 18.9 查询当前存储设置
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/settings/storage'
 ```
 
-### 17.9 测试 ZOS 候选设置
+### 18.10 测试 ZOS 候选设置
 
 ```bash
 curl --fail-with-body \
@@ -1593,7 +1807,7 @@ curl --fail-with-body \
   'http://zos-upload-service:8000/v1/settings/storage/test'
 ```
 
-### 17.10 保存并激活 ZOS 设置
+### 18.11 保存并激活 ZOS 设置
 
 ```bash
 curl --fail-with-body \
@@ -1604,19 +1818,24 @@ curl --fail-with-body \
   'http://zos-upload-service:8000/v1/settings/storage'
 ```
 
-### 17.11 查询 Provider 原生指标
+### 18.12 查询 Provider 原生指标
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/dashboard/storage'
 ```
 
-## 18. 调用方注意事项
+## 19. 调用方注意事项
 
 - 上传请求使用 `multipart/form-data`，字段名固定为 `file`。
 - 文件内容直接放入 multipart，避免 Base64 编码和 JSON 包装。
 - 接近 200 MiB 的文件需要预留足够客户端超时时间。
 - `url` 作为不透明字符串保存和传递。
+- 需要删除能力的调用方必须同时安全保存 `task_id` 和 `delete_token`；其他对象元数据可用于审计，但不得自行构造 ZOS 删除请求。
+- `delete_token` 只发送到本服务的 `X-Delete-Token` Header，不写入 URL、普通日志、浏览器存储或公网 API 请求。
+- 调用方不能通过删除接口指定 Bucket、Key、URL、Provider 或 VersionId。
+- `202 DELETE_PENDING` 不是删除成功；继续查询任务的 `object_status`。
+- `deleted` 只确认 ZOS 源对象或精确版本不存在，不代表 CDN 和第三方缓存已经失效。
 - `unknown` 属于可恢复的非终态，调用方应继续查询。
 - 任务列表、Dashboard 和日志包含原始文件名、对象 Key 和公网 URL，只能在受控局域网访问。
 - 排查问题时提供 `request_id` 和 `task_id`。
@@ -1627,4 +1846,4 @@ curl --fail-with-body \
 - 设置请求优先通过局域网 HTTPS 发送，反向代理和调用方禁止记录请求体。
 - 局域网内任何可访问服务端口的客户端都能修改设置，网络边界需要覆盖 Dashboard 与设置 API。
 - Dashboard 本地统计表示本服务处理的上传；Provider 原生指标表示整个 Bucket 的活动。
-- 任务默认保留 180 天，日志默认保留 30 天或最多 100000 条。
+- 对象仍可能存在的任务不会按年龄清理；只有对象状态为 `absent` 或 `deleted` 的终态任务才适用默认 180 天保留期。日志默认保留 30 天或最多 100000 条。
