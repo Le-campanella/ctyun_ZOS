@@ -1,6 +1,6 @@
-# 局域网轻量文件上传服务实施计划（ZOS v2）
+# 局域网轻量文件上传服务实施计划（ZOS v3）
 
-> 状态：v5 方案已确认，删除能力待实现。
+> 状态：v6 方案已确认，删除与多存储预设能力待实现。
 >
 > 完整调用方与 Dashboard 接口契约见 [API.md](API.md)。本文与 `API.md` 已完成同步。
 
@@ -17,6 +17,7 @@
 7. 保存并展示 `NOTIFY` 及以上级别的结构化运行日志。
 8. 在服务异常重启后，通过存储 Provider 的对象元数据接口恢复可确认的上传结果。
 9. 允许上传调用方凭对象级删除凭证严格删除该任务创建的 ZOS 对象，并永久保留删除审计记录。
+10. 支持配置多个存储预设；调用方可选择一个固定绑定 Endpoint 与 Bucket 的预设，未指定时使用唯一默认预设。
 
 ## 2. 信任边界与范围
 
@@ -26,7 +27,7 @@
 - API 与 Dashboard 共用同一个局域网端口。
 - 服务不设置统一的调用方认证、登录、用户、角色或权限系统。
 - 对象删除是例外的破坏性操作，必须同时提供任务 ID 和上传成功时返回的对象级 `delete_token`；该 token 是持有者凭证，不代替未来的统一服务认证。
-- 局域网内能够访问该端口的客户端可以读取监控信息，也可以修改存储设置。
+- 局域网内能够访问该端口的客户端可以读取监控信息、选择任意启用的存储预设，也可以修改存储设置。
 - 局域网、防火墙、交换机 VLAN 和部署平台的端口暴露规则构成访问边界。
 - 部署配置禁止公网入口、端口转发和公有负载均衡器。
 - CORS 默认关闭，Dashboard 通过同源接口读写设置。
@@ -46,7 +47,7 @@
 - 查询上传流量统计。
 - 查询 `NOTIFY` 及以上日志。
 - 查看 Dashboard 监控页面。
-- 查看、测试和修改当前存储 Provider 设置。
+- 创建、查看、测试、修改、启用或禁用多个存储预设，并设置唯一默认预设。
 - 健康检查、就绪检查和中断任务恢复。
 
 服务范围之外：
@@ -54,7 +55,7 @@
 - 持久化保存文件本体。
 - 代理下载、更新、重命名或列出 ZOS 对象。
 - 删除调用方任意指定的 Bucket、对象 Key、URL 或非本服务上传的对象。
-- 由调用方指定 Bucket、对象 ACL 或任意对象 Key。
+- 由调用方直接提交 Endpoint、Bucket、对象 ACL 或任意对象 Key；调用方只能选择服务端已启用的预设。
 - 文件去重、内容搜索、文件分类、版本管理和素材管理。
 - Dashboard 内执行文件上传、任务重试、对象删除或 Bucket 权限管理。
 - 通过 Dashboard 创建、删除或修改 ZOS Bucket、生命周期、ACL、策略、版本控制或 CORS。
@@ -92,9 +93,9 @@ Python 3.11 同时满足常规运行环境和当前 ZOS 官方 Python SDK 的版
 │  上传 API ─────────┐                                      │
 │  删除 API ─────────┤                                      │
 │  查询 API ─────────┼──> SQLite                            │
-│  Dashboard API ────┤    - storage_configs                 │
-│  设置 API ─────────┤    - upload_tasks                    │
-│  日志模块 ─────────┘    - service_logs                    │
+│  Dashboard API ────┤    - storage_presets                 │
+│  设置 API ─────────┤    - storage_configs                 │
+│  日志模块 ─────────┘    - upload_tasks / service_logs     │
 │                                                           │
 │  Dashboard HTML / JS / Chart.js                           │
 │                                                           │
@@ -107,7 +108,7 @@ Python 3.11 同时满足常规运行环境和当前 ZOS 官方 Python SDK 的版
                                         第三方公网 API
 ```
 
-上传 API 与调用方契约保持 Provider 无关。后续增加其他对象存储时，新增 Provider adapter 和设置预设，局域网调用方继续使用相同的 `/v1/uploads`、任务查询和错误结构。
+上传 API 与调用方契约保持 Provider 无关。每个预设固定绑定一个 Provider、Endpoint、Bucket 和公网访问根地址；同一 Endpoint 下的不同 Bucket 建立为不同预设。调用方只提交稳定的 `preset_key`，不能直接覆盖存储参数。
 
 文件只在当前请求期间存在于受控临时文件中。请求完成、失败或客户端断开后立即关闭并删除临时文件。
 
@@ -186,16 +187,40 @@ MAX_CONCURRENT_UPLOADS × MAX_UPLOAD_BYTES × 1.2
 
 ## 7. SQLite 数据模型
 
-数据库包含三张业务表。使用 `PRAGMA user_version` 管理轻量级手写 schema 升级。
+数据库包含四张业务表。使用 `PRAGMA user_version` 管理轻量级手写 schema 升级。
 
-### 7.1 存储配置表
+### 7.1 存储预设表
 
-每次成功激活设置都会创建一条不可变配置 revision。表结构使用 Provider 通用 envelope，ZOS 专属字段保存在 `config_json`，凭证作为一个整体加密保存。后续增加其他对象存储 Provider 时，只需增加 adapter、preset 和 schema 校验，无需为每个 Provider 增加数据库列。
+预设是调用方可选择的稳定路由标识。`preset_key` 创建后不可修改，格式为 1 至 64 个字符的小写 slug，只允许小写字母、数字和中划线，且首尾必须为字母或数字。
+
+```sql
+CREATE TABLE storage_presets (
+    id              TEXT PRIMARY KEY,
+    preset_key      TEXT NOT NULL UNIQUE,
+    display_name    TEXT NOT NULL,
+    enabled         INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    is_default      INTEGER NOT NULL CHECK (is_default IN (0, 1)),
+    state_revision  INTEGER NOT NULL CHECK (state_revision >= 1),
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX uq_storage_presets_default
+ON storage_presets(is_default)
+WHERE is_default = 1;
+```
+
+任意时刻最多一个默认预设；存在可上传预设时必须有且仅有一个启用的默认预设。第一个成功创建的预设自动成为默认项。当前默认预设不能直接禁用，必须先把另一个启用预设设为默认。预设不提供硬删除接口，以免历史任务失去可解释的路由关系。
+
+### 7.2 存储配置表
+
+每个预设每次成功保存设置都会创建一条不可变配置 revision。表结构使用 Provider 通用 envelope，ZOS 专属字段保存在 `config_json`，凭证作为一个整体加密保存。
 
 ```sql
 CREATE TABLE storage_configs (
     id                       TEXT PRIMARY KEY,
-    revision                 INTEGER NOT NULL UNIQUE CHECK (revision >= 1),
+    preset_id                TEXT NOT NULL REFERENCES storage_presets(id),
+    revision                 INTEGER NOT NULL CHECK (revision >= 1),
     provider                 TEXT NOT NULL,
     provider_schema_version  INTEGER NOT NULL CHECK (provider_schema_version >= 1),
     config_json              TEXT NOT NULL,
@@ -204,15 +229,16 @@ CREATE TABLE storage_configs (
     created_at               TEXT NOT NULL,
     activated_at             TEXT NOT NULL,
     last_tested_at           TEXT NOT NULL,
-    last_test_latency_ms     INTEGER
+    last_test_latency_ms     INTEGER,
+    UNIQUE (preset_id, revision)
 );
 
 CREATE UNIQUE INDEX uq_storage_configs_active
-ON storage_configs(status)
+ON storage_configs(preset_id)
 WHERE status = 'active';
 
 CREATE INDEX idx_storage_configs_revision
-ON storage_configs(revision DESC);
+ON storage_configs(preset_id, revision DESC);
 
 CREATE INDEX idx_storage_configs_provider_revision
 ON storage_configs(provider, revision DESC);
@@ -223,12 +249,13 @@ ON storage_configs(provider, revision DESC);
 | 字段 | 说明 |
 |---|---|
 | `id` | 配置 UUID，供任务引用 |
-| `revision` | 从 1 开始递增的可见版本号 |
+| `preset_id` | 所属存储预设 |
+| `revision` | 在同一预设内从 1 开始递增的可见版本号 |
 | `provider` | Provider ID；第一版为 `ctyun_zos` |
 | `provider_schema_version` | 该 Provider 设置结构的版本；`ctyun_zos` 第一版为 `1` |
 | `config_json` | Provider 专属的非敏感配置；ZOS 包含 Endpoint、Bucket、`public_base_url`、超时、重试、TLS 和指标开关 |
 | `credentials_ciphertext` | Provider credential envelope 的认证密文；ZOS 包含 AK 和 SK |
-| `status` | `active` 或 `inactive`，任意时刻最多一个 active revision |
+| `status` | `active` 或 `inactive`，每个预设任意时刻最多一个 active revision |
 | `last_tested_at` | 激活前最后一次连接测试时间 |
 | `last_test_latency_ms` | Provider 连接测试耗时 |
 
@@ -238,7 +265,7 @@ Provider registry 负责按照 `provider + provider_schema_version` 校验 `conf
 
 Provider ID 不使用数据库枚举约束，新增 adapter 和 preset 即可引入新 Provider。仍有任务引用历史 revision 时，对应 Provider adapter 和 schema 解析器必须继续保留。
 
-### 7.2 上传任务表
+### 7.3 上传任务表
 
 ```sql
 CREATE TABLE upload_tasks (
@@ -320,9 +347,11 @@ ON upload_tasks(object_status, created_at DESC);
 | `finished_at` | UTC ISO 8601 完成时间 |
 | `duration_ms` | 完整请求处理耗时 |
 
-schema v1 升级到 v2 时不伪造历史元数据：旧的成功任务设置为 `legacy_unverified`，其他旧任务按可确认结果设置为 `pending` 或 `absent`。历史任务不会自动获得可对外使用的删除凭证；只有经过显式、受审计的后续校验或重新上传后才能进入严格删除范围。
+schema v1 升级到 v2 时不伪造历史元数据：旧的成功任务设置为 `legacy_unverified`，其他旧任务按可确认结果设置为 `pending` 或 `absent`。历史任务不会自动获得可对外使用的删除凭证。
 
-### 7.3 运行日志表
+schema v2 升级到 v3 时创建 `preset_key=default`、显示名为“默认 ZOS”的启用默认预设，并把现有全部 `storage_configs` 关联到该预设；配置 revision 与任务的 `storage_config_id` 保持不变。
+
+### 7.4 运行日志表
 
 ```sql
 CREATE TABLE service_logs (
@@ -353,7 +382,7 @@ ON service_logs(task_id);
 
 `details_json` 只保存已经清洗的结构化上下文，不保存文件内容、AK、SK、密文、Authorization、Cookie 或完整环境变量。
 
-### 7.4 SQLite 运行参数
+### 7.5 SQLite 运行参数
 
 每个请求或工作线程使用独立连接，并设置：
 
@@ -364,15 +393,15 @@ PRAGMA busy_timeout=5000;
 PRAGMA foreign_keys=ON;
 ```
 
-数据库写事务保持短小。激活新配置时，在一个事务内将旧 revision 设为 `inactive` 并插入新 `active` revision。统计查询和 Dashboard 查询使用只读连接。日志写入失败不会改变上传结果，结构化日志仍会输出到 stdout/stderr，并将服务状态标记为 degraded。
+数据库写事务保持短小。更新某个预设时，在一个事务内将该预设的旧 revision 设为 `inactive` 并插入新 `active` revision；切换默认预设也在单个事务内完成。统计查询和 Dashboard 查询使用只读连接。
 
 ## 8. 上传状态流与一致性
 
 ### 8.1 正常流程
 
 1. 接收请求头，确定最终 `request_id`。
-2. 处理可选 `Idempotency-Key`；成功任务的幂等重放无需依赖当前 active 配置。
-3. 读取当前 active `storage_config`，创建不可变配置快照；缺失时返回 `503 STORAGE_NOT_CONFIGURED`。
+2. 校验可选 `X-Storage-Preset` 的格式，并处理可选 `Idempotency-Key`；已有任务优先按原预设执行重放或冲突判断。
+3. 新任务使用显式指定的启用预设；未指定时使用唯一默认预设。读取该预设的 active `storage_config` 并创建不可变快照。
 4. 获取上传并发槽位。
 5. 解析 `file`，生成任务 UUID、对象 Key 和公网 URL。
 6. 在 SQLite 中原子写入 `uploading` 任务，同时记录 `storage_config_id`。
@@ -387,17 +416,17 @@ PRAGMA foreign_keys=ON;
 
 ### 8.2 配置激活与并发上传
 
-保存设置时执行以下流程：
+保存某个预设的设置时执行以下流程：
 
 1. 校验 Provider envelope、`provider_schema_version`、URL、Bucket 名称、超时和重试参数。
 2. 合并当前已保存凭证与本次提交的凭证；首次配置必须提交 AK 和 SK。Provider、`provider_schema_version` 或 `endpoint_url` 发生变化时必须重新提交完整 AK/SK，禁止把旧凭证自动发送到新的设置结构或 Endpoint。
 3. 创建候选 `ctyun_zos` Client，并调用 `HeadBucket` 测试 Endpoint、凭证和 Bucket 可访问性。
 4. 测试成功后，将 Provider credential envelope（ZOS 为 AK/SK）整体加密。
-5. 在单个 SQLite 事务内创建新 revision，并将旧 revision 设为 `inactive`。
-6. 原子替换进程内 active Provider 快照和 Client 缓存。
+5. 在单个 SQLite 事务内为该预设创建新 revision，并将其旧 revision 设为 `inactive`。
+6. 原子替换以 `storage_config_id` 为键的 Provider 快照和 Client 缓存。
 7. 写入 `storage_config_activated` NOTIFY 日志；日志只包含 Provider、revision、Endpoint 主机名、Bucket 和来源 IP。
 
-正在执行的上传持有旧配置快照并继续完成；新任务使用新 revision。旧 revision 在仍被任务引用时保留。连接测试只确认 Client 可创建且 `HeadBucket` 成功，不承诺 `PutObject` 权限或公网 URL 可读取性，真实上传能力由集成测试和实际上传继续验证。
+正在执行的上传持有旧配置快照并继续完成；新任务使用目标预设的新 revision。默认预设切换只影响切换后的未指定预设的新任务。显式选择的预设失败时不回退到默认项，也不尝试其他预设；第一版不做负载均衡、权重、健康路由或故障转移。
 
 ### 8.3 数据库更新失败
 
@@ -419,7 +448,7 @@ PRAGMA foreign_keys=ON;
 5. 超时、网络异常、认证异常或服务端错误：更新为 `unknown`，错误码为 `RECOVERY_PENDING`。
 6. 进程内周期任务继续扫描全部 `unknown` 任务，以及超过 `STALE_UPLOAD_SECONDS` 的 `uploading` 任务，默认每 60 秒重试。
 
-旧 revision 的 AK/SK 已失效且当前 active revision 指向同一 Provider、Endpoint 和 Bucket 时，恢复器可以使用 active revision 再尝试一次。`unknown` 表示当前无法确认远端结果，可以继续转为 `succeeded` 或 `failed`。
+旧 revision 的 AK/SK 已失效且同一预设的当前 active revision 指向相同 Provider、Endpoint 和 Bucket 时，恢复器可以使用该 revision 再尝试一次；不得使用默认预设或其他预设替代。
 
 ### 8.5 正常上传确认
 
@@ -429,7 +458,7 @@ PRAGMA foreign_keys=ON;
 
 ### 8.6 对象删除状态流
 
-删除只使用任务绑定的不可变 `storage_config_id` 和数据库中的 `object_key`。请求体、查询参数和 Header 均不得覆盖 Provider、Endpoint、Bucket、对象 Key 或 VersionId。
+删除只使用任务绑定的不可变 `storage_config_id` 和数据库中的 `object_key`。预设被禁用、默认项被切换或配置新增 revision 均不改变删除目标。
 
 1. 校验任务 UUID 和 `X-Delete-Token` 格式，并使用常量时间比较验证签名。
 2. 读取任务及其原 storage config；只允许 `status=succeeded` 且 `object_status=present` 的任务进入删除。
@@ -455,6 +484,8 @@ Idempotency-Key: opaque-key-up-to-128-chars
 
 - Header 可选，最大 128 个字符。
 - 第一次出现的幂等键创建新任务。
+- 幂等键同时绑定首次新任务解析得到的 `preset_key`。重放请求未携带 `X-Storage-Preset` 时始终返回原任务，不受默认项变化影响。
+- 重放请求显式指定了与原任务不同的预设时返回 `409 IDEMPOTENCY_SCOPE_MISMATCH`。
 - 已有任务为 `succeeded` 时，返回同一个任务、Key 和 URL，状态码为 `200`，响应头包含 `Idempotency-Replayed: true`。
 - 已有任务为 `uploading` 或 `unknown` 时，返回 `409 UPLOAD_IN_PROGRESS` 并包含 `task_id`。
 - 已有任务为 `failed` 时，返回 `409 IDEMPOTENCY_KEY_REUSED`；新的上传尝试使用新的幂等键。
@@ -474,6 +505,7 @@ POST /v1/uploads
 Content-Type: multipart/form-data
 X-Request-ID: optional
 Idempotency-Key: optional
+X-Storage-Preset: optional
 
 file=<binary>
 ```
@@ -483,6 +515,7 @@ file=<binary>
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "storage_preset": "zos-main",
   "key": "2026/07/28/550e8400-e29b-41d4-a716-446655440000.pdf",
   "url": "https://public-bucket.example.com/2026/07/28/550e8400-e29b-41d4-a716-446655440000.pdf",
   "size_bytes": 125678,
@@ -503,7 +536,7 @@ GET /v1/upload-tasks?limit=50&offset=0&status=succeeded&from=...&to=...
 - `offset` 默认 0。
 - 可选按状态和 UTC 时间范围筛选。
 - 排序固定为 `created_at DESC, id DESC`。
-- 列表增加 `request_id`、`content_type`、`object_key`、`duration_ms`、`storage_provider`、`storage_config_revision`、`etag`、`version_id`、`object_status` 和删除结果字段。
+- 列表增加 `request_id`、`storage_preset`、`content_type`、`object_key`、`duration_ms`、`storage_provider`、`storage_config_revision`、`etag`、`version_id`、`object_status` 和删除结果字段。
 - 列表和详情永远不返回 `delete_token`。
 - Dashboard 的近期上传表直接复用该接口。
 
@@ -548,7 +581,7 @@ GET /readyz
 - 临时目录可写且剩余空间满足阈值。
 - 启动 schema 初始化完成。
 - 启动恢复扫描完成。
-- 最近一次 active Storage Provider 探测成功且未超过缓存有效期；`ctyun_zos` 使用 `HeadBucket`。
+- 默认预设的 active Storage Provider 探测成功且未超过缓存有效期；非默认预设故障显示为 degraded，但不阻止默认上传就绪。
 
 任一关键项失败时返回 `503` 和各依赖项状态。
 
@@ -561,22 +594,31 @@ GET /v1/dashboard/logs?min_level=NOTIFY&limit=100&before_id=...
 GET /v1/dashboard/storage?from=...&to=...
 ```
 
-`/v1/dashboard/storage` 是否启用由 active storage config 的 Provider 能力和 `enable_bucket_metrics` 决定，关闭时返回明确的 disabled 状态。
+`/v1/dashboard/storage` 可通过 `preset_key` 查询指定预设，未传时使用默认预设；是否启用由该预设 active storage config 的 Provider 能力和 `enable_bucket_metrics` 决定。
 
 ### 10.8 存储设置接口
 
 ```http
 GET  /v1/settings/storage/providers
+GET  /v1/settings/storage/presets
+POST /v1/settings/storage/presets
+GET  /v1/settings/storage/presets/{preset_key}
+PUT  /v1/settings/storage/presets/{preset_key}
+PATCH /v1/settings/storage/presets/{preset_key}
+PUT  /v1/settings/storage/default
 GET  /v1/settings/storage
 POST /v1/settings/storage/test
 PUT  /v1/settings/storage
 ```
 
-- Provider 列表接口用于描述当前支持的设置预设与 `provider_schema_version`；第一版只返回 `ctyun_zos` schema version `1`。
-- 当前设置接口只返回非敏感字段、masked AK 和凭证是否已配置。
-- 测试接口不持久化数据，使用候选设置执行 `HeadBucket`。
-- 保存接口使用 `expected_revision` 防止并发覆盖，测试通过后创建新 revision 并原子激活。
-- `POST` 和 `PUT` 必须使用 `application/json` 并携带 `X-Settings-Request: true`。
+- Provider 列表接口描述支持的 Provider 类型；预设列表接口返回服务端可选目标。
+- 创建预设同时保存 revision 1；第一个预设自动成为默认项。
+- `PUT .../{preset_key}` 使用 `expected_revision` 更新不可变配置 revision。
+- `PATCH .../{preset_key}` 使用 `expected_state_revision` 修改显示名或启用状态；`preset_key` 不可修改，预设不提供硬删除。
+- `PUT .../default` 原子切换唯一默认预设；目标必须已启用。
+- 原 `GET/PUT /v1/settings/storage` 保留为默认预设的兼容别名；数据库为空时，首次 PUT 创建 `default` 预设。
+- 测试接口不持久化数据，可通过 `preset_key` 复用该预设已保存的凭证。
+- `POST`、`PUT` 和 `PATCH` 必须使用 `application/json` 并携带 `X-Settings-Request: true`。
 - 设置接口无身份认证，访问边界仍由局域网和端口暴露规则提供。
 
 所有响应时间字段使用 UTC ISO 8601。Dashboard 按 `APP_TIMEZONE` 显示。
@@ -598,7 +640,7 @@ GET /dashboard
 GET /dashboard/settings
 ```
 
-Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区域为只读，设置页面可以测试和激活存储配置。
+Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区域为只读，设置页面可以管理多个存储预设。
 
 ### 11.2 监控页面内容
 
@@ -613,7 +655,7 @@ Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区�
    - 进程状态。
    - SQLite 状态。
    - 临时目录状态。
-   - active Provider、配置 revision、存储连通性及最近探测时间。
+   - 默认预设、active Provider、配置 revision、存储连通性及最近探测时间。
    - 启动恢复是否完成。
 
 3. **上传概览**
@@ -640,7 +682,7 @@ Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区�
 
 ### 11.3 设置页面内容
 
-第一版提供 **天翼云对象存储 ZOS** 预设：
+设置页先列出全部存储预设，显示 `preset_key`、显示名、Provider、Endpoint 主机名、Bucket、配置 revision、启用状态、默认状态和最近测试结果，并支持新建、编辑、测试、设为默认以及启停非默认预设。选中预设后按 Provider 类型渲染表单；第一版提供 **天翼云对象存储 ZOS**：
 
 | 设置项 | 必填 | 说明 |
 |---|---:|---|
@@ -659,12 +701,12 @@ Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区�
 
 页面显示：
 
-- 当前 Provider 和 revision。
+- 当前 `preset_key`、预设状态 revision、Provider 和配置 revision。
 - 当前 Endpoint、Bucket、public base URL 与连接参数。
 - masked AK，例如 `****A1B2`。
 - SK 是否已配置，永远不显示原值。
 - 最近一次连接测试状态、时间和耗时。
-- “测试连接”和“保存并激活”两个操作。
+- “测试连接”和“保存并激活新 revision”两个操作。
 - 当 `public_base_url` 为空时，页面可根据 Bucket 与外网 Endpoint 建议 `https://{bucket}.{endpoint-host}`，用户仍可改为控制台显示的 Bucket 外网访问域名、CDN 或自定义域名。
 
 保存前显示目标 Endpoint、Bucket 和新 revision 的确认信息。任何局域网客户端只要可以访问该服务端口，就可以执行这些设置操作。
@@ -781,6 +823,7 @@ NOTIFY = 25
 - `object_key`
 - `duration_ms`
 - `error_code`
+- `storage_preset`
 - `storage_provider`
 - `storage_config_revision`
 
@@ -793,7 +836,7 @@ NOTIFY = 25
 上传服务内部定义稳定的 Provider adapter：
 
 - `provider_id` 与 `schema_version`：标识 adapter 及其设置结构。
-- `get_settings_schema()`：返回 Dashboard 使用的 Provider preset、非敏感字段与凭证字段定义。
+- `get_settings_schema()`：返回 Dashboard 使用的 Provider 类型、非敏感字段与凭证字段定义。
 - `validate_config()`：校验 Provider 专属设置与凭证 envelope。
 - `create_client()`：根据已解密凭证创建 Client。
 - `test_connection()`：执行低副作用连通性检查。
@@ -803,7 +846,7 @@ NOTIFY = 25
 - `get_metrics()`：获取可选 Provider 指标。
 - `build_public_url()`：使用已保存的访问根地址构造 URL。
 
-上传调用方只依赖本服务的 HTTP API。未来增加其他 SDK 或对象存储时，新增 adapter 和 provider preset，不改变 `/v1/uploads` 请求或删除接口的 Provider-neutral 语义。
+上传调用方只依赖本服务的 HTTP API。未来增加其他 SDK 或对象存储时，新增 adapter 和 Provider 类型，不改变 `/v1/uploads` 请求或删除接口的 Provider-neutral 语义。
 
 ### 14.2 `ctyun_zos` 预设
 
@@ -910,9 +953,15 @@ MAX_CONCURRENT_UPLOADS × S3_TRANSFER_MAX_CONCURRENCY + 4
 | 400 | `BAD_REQUEST` | multipart 或查询参数错误 |
 | 400 | `STORAGE_CONFIG_INVALID` | Provider、schema version、设置字段、URL、Bucket、凭证格式或参数不合法 |
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/Endpoint 变化时缺少完整 AK/SK |
+| 400 | `STORAGE_PRESET_INVALID` | 预设 key 格式错误 |
 | 403 | `DELETE_TOKEN_INVALID` | 删除凭证缺失、格式错误或与任务不匹配 |
 | 404 | `TASK_NOT_FOUND` | 任务不存在 |
+| 404 | `STORAGE_PRESET_NOT_FOUND` | 指定预设不存在 |
 | 409 | `CONFIG_REVISION_CONFLICT` | `expected_revision` 与当前 active revision 不一致 |
+| 409 | `PRESET_STATE_CONFLICT` | 预设状态 revision 冲突或试图禁用默认项 |
+| 409 | `DEFAULT_PRESET_CONFLICT` | 默认项切换并发冲突或目标未启用 |
+| 409 | `STORAGE_PRESET_DISABLED` | 上传显式指定了已禁用预设 |
+| 409 | `IDEMPOTENCY_SCOPE_MISMATCH` | 幂等键原任务绑定了其他预设 |
 | 409 | `UPLOAD_IN_PROGRESS` | 同一幂等键对应任务仍在处理或待确认 |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | 同一幂等键已对应失败任务 |
 | 409 | `OBJECT_NOT_DELETABLE` | 任务状态、对象状态或历史元数据不满足严格删除条件 |
@@ -929,7 +978,8 @@ MAX_CONCURRENT_UPLOADS × S3_TRANSFER_MAX_CONCURRENCY + 4
 | 502 | `STORAGE_CREDENTIALS_REJECTED` | 设置测试中的 AK/SK 被拒绝 |
 | 502 | `STORAGE_BUCKET_UNAVAILABLE` | Bucket 不存在或当前凭证不可访问 |
 | 503 | `UPLOAD_CAPACITY_EXCEEDED` | 上传并发槽位已满 |
-| 503 | `STORAGE_NOT_CONFIGURED` | 尚未激活存储配置 |
+| 503 | `STORAGE_NOT_CONFIGURED` | 显式预设尚未激活配置 |
+| 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 没有可用默认预设 |
 | 503 | `NOT_READY` | 就绪检查失败 |
 | 503 | `STORAGE_METRICS_UNAVAILABLE` | 可选 Storage Provider 原生指标暂时不可用 |
 
@@ -983,7 +1033,7 @@ DASHBOARD_ENABLED=true
 
 ### 16.2 可选的首次启动 ZOS 导入
 
-为了兼容最初的环境变量部署，以下变量只用于数据库中没有任何 storage config 时创建 revision 1：
+为了兼容最初的环境变量部署，以下变量只用于数据库中没有任何 storage preset 时创建 `preset_key=default` 及 revision 1：
 
 ```text
 ZOS_ENDPOINT
@@ -1000,24 +1050,24 @@ ENABLE_ZOS_BUCKET_METRICS=false
 
 导入规则：
 
-- `BOOTSTRAP_STORAGE_FROM_ENV=true` 且五个必要字段完整时，服务测试连接、加密凭证并创建 revision 1。
-- 数据库已有 active 或 inactive revision 后，环境变量不再自动覆盖 Dashboard 设置。
-- 导入完成后，active storage config 是上传流程的唯一运行时来源。
+- `BOOTSTRAP_STORAGE_FROM_ENV=true` 且五个必要字段完整时，服务测试连接、加密凭证并创建启用的默认预设及 revision 1。
+- 数据库已有任意预设后，环境变量不再自动覆盖 Dashboard 设置。
+- 导入完成后，该预设的 active storage config 是默认上传的运行时来源。
 - 环境中的 AK/SK 仍不得进入日志。
 
 ### 16.3 未配置状态
 
-数据库没有 active storage config 时：
+数据库没有启用的默认预设或默认预设没有 active storage config 时：
 
 - 服务进程和 Dashboard 正常启动。
 - `/healthz` 返回 `200`。
-- `/readyz` 返回 `503 STORAGE_NOT_CONFIGURED`。
-- `POST /v1/uploads` 返回 `503 STORAGE_NOT_CONFIGURED`，不创建任务。
+- `/readyz` 返回 `503 STORAGE_DEFAULT_NOT_CONFIGURED`。
+- 未指定预设的 `POST /v1/uploads` 返回 `503 STORAGE_DEFAULT_NOT_CONFIGURED`，不创建任务。
 - `/dashboard/settings` 可用于完成首次配置。
 
-### 16.4 Dashboard 管理的 ZOS 设置
+### 16.4 Dashboard 管理的存储预设与 ZOS 设置
 
-Dashboard 管理：
+Dashboard 可以管理多个预设。每个预设固定包含：
 
 ```text
 provider=ctyun_zos
@@ -1038,8 +1088,10 @@ enable_bucket_metrics
 - GET 接口只返回 masked AK、AK 是否配置和 SK 是否配置。
 - 同一 Provider、`provider_schema_version` 和 `endpoint_url` 下更新时，可以省略整个 `credentials` 对象或其中一个字段，表示沿用 active revision 的对应凭证；空字符串为非法值。
 - Provider、`provider_schema_version` 或 `endpoint_url` 发生变化时必须同时提交新的 AK 和 SK。
-- 每次保存都创建新 revision，不原地修改历史记录。
+- 每个预设独立维护 revision；每次保存都创建新 revision，不原地修改历史记录。
 - 保存失败或连接测试失败时，旧 active revision 保持不变。
+- `preset_key` 创建后不可修改；禁用只阻止新上传，历史任务的恢复和删除继续使用原配置。
+- 不实现自动选路、轮询、权重、负载均衡或失败回退。
 - ZOS 凭证至少具备执行 HeadBucket、PutObject、设置 `public-read` 对象 ACL、multipart upload、HeadObject 和 DeleteObject 所需的目标 Bucket 权限；Bucket 启用版本控制时还必须具备读取和删除精确版本所需权限。启用 Bucket 指标时再增加对应统计读取权限。
 - 优先使用专用 IAM 用户或服务账号的 AK/SK，并将权限范围限制在目标 Bucket；Dashboard 不管理 IAM、Bucket ACL 或 Bucket Policy。
 
@@ -1052,6 +1104,7 @@ enable_bucket_metrics
 - 只删除超过 `TASK_RETENTION_DAYS` 且对象状态为 `absent` 或 `deleted` 的终态任务。
 - 无论年龄多久，保留所有 `uploading`、`unknown`、`pending`、`present`、`legacy_unverified`、`deleting` 和 `delete_unknown` 任务，避免产生无法通过服务定位的孤儿对象。
 - 保留被任何任务引用的 storage config revision。
+- 存储预设不通过 HTTP 硬删除。
 - 只有 inactive revision 已无任务引用且超过 `TASK_RETENTION_DAYS` 时才允许删除。
 - 执行 `PRAGMA optimize`。
 - 记录 `maintenance_completed` 日志。
@@ -1082,12 +1135,17 @@ enable_bucket_metrics
 - 任务插入、更新和稳定排序正确。
 - SQLite WAL、busy timeout 和多连接并发行为正确。
 - 幂等键的首次请求、重放、处理中冲突和失败后冲突正确。
+- 默认项切换后，未指定预设的幂等重放仍返回原任务；显式改用其他预设返回 `IDEMPOTENCY_SCOPE_MISMATCH`。
 - 上传容量达到上限时返回 `503`，查询接口继续可用。
 - 本地统计的数量、字节数、成功率、平均耗时和 P95 计算正确。
 - `NOTIFY` 及以上日志入库，较低级别只输出到 stdout。
 - 日志筛选、分页、保留和裁剪正确。
 - Dashboard 对文件名和日志内容进行 HTML 转义。
 - Provider preset、`provider_schema_version`、当前设置、测试连接和保存激活接口结构正确。
+- 多预设的创建、查询、配置更新、启停和默认项原子切换正确。
+- `preset_key` 格式、唯一性、不可修改性以及默认预设不可直接禁用的约束正确。
+- 显式预设、默认预设、未知预设、禁用预设和未配置默认预设的上传路由正确。
+- 显式预设失败时不回退到默认项或其他预设。
 - 首次配置以及 Provider 或 Endpoint 变化时必须提交完整 AK/SK；同一 Provider 和 Endpoint 下更新时省略凭证可以保留旧值。
 - GET 设置接口、HTML、日志和错误响应不包含 AK/SK 明文或密文。
 - `expected_revision` 冲突返回 `409 CONFIG_REVISION_CONFLICT`。
@@ -1112,7 +1170,8 @@ enable_bucket_metrics
 - `SETTINGS_ENCRYPTION_KEY` 错误、凭证解密失败和设置事务失败。
 - Provider 或 Endpoint 改变但未重新提交完整 AK/SK 时被拒绝。
 - 设置 GET、错误响应、日志、数据库明文字段和浏览器存储均不出现 AK/SK。
-- active revision 切换时终止进程，重启后保持单一 active revision。
+- 每个预设的 active revision 切换时终止进程，重启后每个预设保持单一 active revision。
+- 默认项切换事务失败时仍保持唯一、启用的旧默认预设。
 - 未完成 multipart upload 被生命周期规则清理。
 - 删除请求在 Provider 调用前、调用中、调用后及数据库提交前终止。
 - 删除超时进入 `delete_unknown`，重启后能够恢复为 `deleted` 或 `present`。
@@ -1120,6 +1179,7 @@ enable_bucket_metrics
 ### 19.3 真实 ZOS 集成测试
 
 - 上传 TXT、PDF、图片和接近 200 MiB 的文件。
+- 配置两个不同 Bucket 的预设，分别显式上传并验证任务绑定到正确预设和对象。
 - 上传超过 multipart 阈值的文件。
 - 校验 ZOS 对象、Content-Type、大小、对象 Key、URL 和任务记录一致。
 - 从第三方公网环境实际访问返回 URL。
@@ -1139,14 +1199,15 @@ enable_bucket_metrics
 - 近期任务可以查看对象 Key、URL 和错误码。
 - `NOTIFY`、`WARNING`、`ERROR`、`CRITICAL` 日志可查看和筛选。
 - Provider 原生统计不可用时，本地统计、任务列表和日志保持可用。
-- `/dashboard/settings` 能显示 masked 凭证、测试连接、保存并激活新 revision。
-- 首次未配置时 Dashboard 可访问，上传接口返回 `STORAGE_NOT_CONFIGURED`。
+- `/dashboard/settings` 能列出多个预设，显示 masked 凭证，测试连接、保存新 revision、切换默认项和启停非默认项。
+- 首次未配置时 Dashboard 可访问，未指定预设的上传接口返回 `STORAGE_DEFAULT_NOT_CONFIGURED`。
 - 设置修改写入 NOTIFY 日志，日志不包含凭证。
 - 页面在服务持续上传时稳定轮询，无明显数据库锁冲突。
 
 ## 20. 完成标准
 
 - 单次调用完成“创建任务、接收临时文件、上传 ZOS、持久化结果、返回 URL”。
+- 调用方可显式选择启用预设；未指定时稳定使用唯一默认预设。
 - 服务不在请求结束后保留文件本体。
 - 上传成功与数据库状态具有可恢复的一致性。
 - 调用方可以通过幂等键避免网络超时后的重复对象。
@@ -1156,6 +1217,7 @@ enable_bucket_metrics
 - Dashboard 显示上传流量、任务状态、服务状态和近期任务。
 - Dashboard 显示并筛选 `NOTIFY` 及以上日志。
 - Dashboard 可以使用天翼云 ZOS 预设测试、保存和激活 SDK Endpoint、Bucket、访问根地址、AK、SK 与连接参数。
+- Dashboard 可以配置多个固定绑定 Endpoint 与 Bucket 的存储预设，并管理唯一默认项。
 - 上传 API 保持 Provider 无关，后续新增其他对象存储 adapter 时调用方契约不变。
 - 配置切换使用不可变 revision，在途上传和恢复任务可以定位原配置。
 - SQLite 在并发上传、Dashboard 轮询和设置切换下保持稳定。
@@ -1164,7 +1226,7 @@ enable_bucket_metrics
 
 ## 21. 实施顺序
 
-1. `[已完成]` 根据本文同步更新 `API.md` v2 删除接口、字段和错误码。
+1. `[已完成]` 根据本文同步更新 `API.md` v3 删除与多预设接口、字段和错误码。
 2. 验证标准 S3 Client 的 Client 创建、Head Bucket、上传、multipart、Content-Type、Head Object 和 URL 生成。
 3. 实现 Storage Provider registry、`ctyun_zos` adapter 和 provider preset 描述。
 4. 建立 Provider 通用的 `storage_configs` envelope、`upload_tasks`、`service_logs` schema、索引、WAL 参数和轻量 schema version。
@@ -1179,12 +1241,13 @@ enable_bucket_metrics
 13. 完成自动测试、故障注入和真实 ZOS 集成测试。
 14. 以单容器部署到局域网，配置持久化目录、临时目录、加密主密钥、生命周期规则和数据库备份。
 15. 升级 schema v2，扩展对象元数据和删除状态，实现签名删除凭证、Provider 删除、恢复与严格测试。
+16. 升级 schema v3，迁移现有配置到 `default` 预设，实现多预设设置 API、上传路由、Dashboard 和测试。
 
 ## 22. 已确认决策
 
 1. 服务只在受控局域网运行，不设置调用方认证。
 2. API 与 Dashboard 共用 FastAPI 服务和同一局域网端口。
-3. Dashboard 监控区域只读，设置页面可以修改 active storage config。
+3. Dashboard 监控区域只读，设置页面可以管理多个 storage preset。
 4. 局域网内能够访问服务端口的客户端均可执行设置操作。
 5. 上传调用方 API 保持 Provider 无关；第一版只实现 `ctyun_zos` adapter。
 6. ZOS 设置至少包含 SDK Endpoint、Bucket、public base URL、AK 和 SK；Endpoint 与对象访问根地址分别保存。
@@ -1210,6 +1273,12 @@ enable_bucket_metrics
 26. 上传成功后通过 `HeadObject` 保存大小、ETag 和可选 VersionId；版本化 Bucket 删除精确版本。
 27. 删除不移除任务记录；状态、错误和删除时间永久留在 SQLite 中。
 28. v1 历史成功任务迁移为 `legacy_unverified`，默认不开放 API 删除。
+29. 每个存储预设固定绑定一个 Provider、Endpoint、Bucket 和公网访问根地址；同一 Endpoint 的不同 Bucket 使用不同预设。
+30. 调用方通过可选 `X-Storage-Preset` 选择预设，未指定时使用唯一默认项；不能提交原始 Endpoint 或 Bucket。
+31. 第一版不实现负载均衡、权重、健康路由、自动故障转移或失败回退。
+32. 显式选择的预设失败时直接报错，不回退到默认项。
+33. 预设可以启用或禁用但不硬删除；禁用只影响新上传，历史任务恢复与删除仍使用原 `storage_config_id`。
+34. 现有单配置迁移为启用的 `default` 预设，任务引用和配置 revision 保持不变。
 
 ## 23. `API.md` 同步状态
 
@@ -1234,6 +1303,10 @@ enable_bucket_metrics
 - [x] 增加对象删除状态、严格元数据校验、精确版本删除、幂等和不确定结果恢复语义。
 - [x] 增加 `DELETE_TOKEN_INVALID`、`OBJECT_NOT_DELETABLE`、`OBJECT_CHANGED`、`DELETE_IN_PROGRESS` 和 `DELETE_FAILED`。
 - [x] 明确历史 `legacy_unverified` 任务默认不可删除。
+- [x] 增加可选 `X-Storage-Preset`、默认预设解析和稳定 `storage_preset` 响应字段。
+- [x] 增加多预设列表、创建、详情、配置更新、状态更新和默认项切换接口。
+- [x] 明确预设禁用、默认切换、幂等重放、任务恢复和删除之间的隔离语义。
+- [x] 增加 `STORAGE_PRESET_INVALID`、`STORAGE_PRESET_NOT_FOUND`、`STORAGE_PRESET_DISABLED`、`PRESET_STATE_CONFLICT`、`DEFAULT_PRESET_CONFLICT` 和 `IDEMPOTENCY_SCOPE_MISMATCH`。
 
 ## 24. 参考资料
 

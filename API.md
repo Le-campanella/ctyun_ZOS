@@ -1,23 +1,23 @@
-# 局域网轻量文件上传服务接口文档（ZOS v2）
+# 局域网轻量文件上传服务接口文档（ZOS v3）
 
 > 面向对象：局域网内调用本服务的其他服务、接入 Agent，以及包含监控与存储设置功能的 Dashboard。
 >
-> 接口文档修订：`v2`（删除能力设计已确认，待实现）；HTTP 路径命名空间继续使用 `/v1`，本次只增加响应字段和新接口，不破坏现有调用方。
+> 接口文档修订：`v3`（删除与多存储预设能力设计已确认，待实现）；HTTP 路径命名空间继续使用 `/v1`。
 >
-> 同步基线：`PLAN.md` v5
+> 同步基线：`PLAN.md` v6
 
 ## 1. 能力范围
 
 本服务提供：
 
-1. 通过当前 active Storage Provider 上传单个文件；第一版支持天翼云对象存储 ZOS。
+1. 通过服务端配置的存储预设上传单个文件；可显式选择预设，未指定时使用默认预设。
 2. 返回上传任务 ID、对象 Key 和公网 URL。
 3. 查询上传任务列表和单个任务详情。
 4. 使用可选 `Idempotency-Key` 避免调用方超时后产生重复对象。
 5. 返回进程健康状态和服务就绪状态。
 6. 提供上传统计、流量时间序列、`NOTIFY` 及以上日志和可选 Storage Provider 原生指标；第一版为 ZOS Bucket 指标。
 7. 提供同源、无登录的 Web Dashboard，其中监控区域只读，设置页面可以测试和激活存储配置。
-8. 提供 Provider preset、当前设置、连接测试和配置 revision API。
+8. 提供 Provider 类型、多个存储预设、默认项、连接测试和配置 revision API。
 9. 提供不会上传对象存储、不会创建任务记录的局域网文件接收测试。
 10. 使用上传成功时返回的对象级删除凭证，严格删除该任务创建的对象并保留审计记录。
 
@@ -33,8 +33,8 @@
 - 防火墙、VLAN、容器网络和端口暴露规则构成访问边界。
 - 部署配置关闭公网入口、端口转发和公有负载均衡器。
 - CORS 默认关闭，Dashboard 通过同源请求读写数据。
-- Dashboard 监控 API 使用 `GET`；存储设置使用 `GET`、`POST` 和 `PUT`。
-- 设置 API 不设身份认证。局域网内能够访问服务端口的客户端均可修改 active storage config。
+- Dashboard 监控 API 使用 `GET`；存储设置使用 `GET`、`POST`、`PUT` 和 `PATCH`。
+- 设置 API 不设身份认证。局域网内能够访问服务端口的客户端均可选择任意启用预设，并可修改全部存储预设。
 - 设置写请求只接受 JSON，并要求自定义 Header `X-Settings-Request: true`，用于降低浏览器跨站误提交风险。
 - 设置请求会传输 AK/SK。正式部署应通过内网 HTTPS 暴露 Dashboard 与设置 API，或将其限制在隔离的管理 VLAN / 管理主机；使用 HTTP 时，能够监听局域网流量的设备也属于信任边界。服务仍保持无身份认证。
 - `delete_token` 是持有者凭证，正式部署必须使用内网 HTTPS；反向代理、APM 和访问日志不得记录 `X-Delete-Token`。
@@ -132,6 +132,7 @@ Host: zos-upload-service:8000
 Content-Type: multipart/form-data; boundary=...
 X-Request-ID: optional-request-id
 Idempotency-Key: optional-idempotency-key
+X-Storage-Preset: optional-preset-key
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -149,9 +150,13 @@ Idempotency-Key: optional-idempotency-key
 - 正式上传固定设置对象 canned ACL `public-read`；调用方不能修改。
 - 原始文件名最多保存 255 个 Unicode 字符，超出部分截断。
 - 原始文件名只用于任务记录和 Dashboard 展示。
-- 新任务使用请求开始时的 active storage config revision；设置切换不会改变已经创建的任务。
-- 尚未激活 storage config 时返回 `503 STORAGE_NOT_CONFIGURED`，不创建任务。
+- `X-Storage-Preset` 可选；值为 1 至 64 个字符的小写 slug，只允许小写字母、数字和中划线，且首尾必须为字母或数字。
+- 显式指定时使用对应的启用预设；未指定时使用唯一默认预设。预设固定绑定 Provider、Endpoint、Bucket 和公网访问根地址。
+- 新任务使用请求开始时解析出的预设及其 active storage config revision；默认项或设置切换不会改变已经创建的任务。
+- 显式预设不存在时返回 `404 STORAGE_PRESET_NOT_FOUND`，已禁用时返回 `409 STORAGE_PRESET_DISABLED`；服务不会回退到默认项或其他预设。
+- 未指定预设且默认项未配置时返回 `503 STORAGE_DEFAULT_NOT_CONFIGURED`，不创建任务。
 - 幂等键命中已有任务时，服务可以在解析文件体之前返回重放或冲突结果；因此重放请求中的文件内容不会用于比较。
+- 对已有幂等任务，未传预设或显式传入原预设时按原任务处理，即使该预设之后被禁用；显式传入其他 key 时优先返回 `IDEMPOTENCY_SCOPE_MISMATCH`，不重新解析默认项。
 
 ### 4.2 对象 Key
 
@@ -175,7 +180,7 @@ YYYY/MM/DD/{task_id}.{safe_extension}
 2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf
 ```
 
-调用方不能指定 Provider、Endpoint、Bucket、对象 ACL 或对象 Key。
+调用方不能直接指定 Provider、Endpoint、Bucket、对象 ACL 或对象 Key；只能通过 `X-Storage-Preset` 选择服务端预设。第一版不做负载均衡、权重、健康路由、故障转移或失败回退。
 
 ### 4.3 首次上传成功
 
@@ -188,6 +193,7 @@ X-Request-ID: 82d1f9d8-...
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "storage_preset": "zos-main",
   "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
   "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
   "size_bytes": 125678,
@@ -201,6 +207,7 @@ X-Request-ID: 82d1f9d8-...
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `task_id` | string | 上传任务 UUID |
+| `storage_preset` | string | 本任务解析并绑定的稳定预设 key |
 | `key` | string | 对象存储中的对象 Key |
 | `url` | string | 对象对应的完整公网 URL |
 | `size_bytes` | integer | `HeadObject` 确认的对象大小 |
@@ -236,6 +243,7 @@ Idempotency-Replayed: true
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "storage_preset": "zos-main",
   "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
   "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
   "size_bytes": 125678,
@@ -249,6 +257,7 @@ Idempotency-Replayed: true
 说明：
 
 - 返回的是原任务和原对象元数据。
+- 返回原任务绑定的 `storage_preset`；默认预设之后发生变化也不影响重放结果。
 - `delete_token` 固定为 `null`，不会通过幂等重放补发；`Idempotency-Key` 不是认证凭证。
 - 本次响应头中的 `X-Request-ID` 对应当前重放请求。
 - 原任务中的 `request_id` 保持首次创建任务时的值。
@@ -261,6 +270,10 @@ Idempotency-Replayed: true
 | 400 | `FILE_REQUIRED` | 新任务缺少 `file` 字段 | 无 |
 | 400 | `FILE_EMPTY` | 文件内容为空 | `failed` |
 | 400 | `BAD_REQUEST` | multipart、Header 或参数格式错误 | 视失败阶段而定 |
+| 400 | `STORAGE_PRESET_INVALID` | `X-Storage-Preset` 格式错误 | 无 |
+| 404 | `STORAGE_PRESET_NOT_FOUND` | 显式指定的预设不存在 | 无 |
+| 409 | `STORAGE_PRESET_DISABLED` | 显式指定的预设已禁用 | 无 |
+| 409 | `IDEMPOTENCY_SCOPE_MISMATCH` | 幂等键原任务绑定了不同预设 | 复用已有任务 ID |
 | 409 | `UPLOAD_IN_PROGRESS` | 相同幂等键对应任务为 `uploading` 或 `unknown` | 复用已有任务 ID |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | 相同幂等键对应任务为 `failed` | 复用已有任务 ID |
 | 413 | `FILE_TOO_LARGE` | 文件或请求体超过上限 | 视失败阶段而定 |
@@ -269,7 +282,8 @@ Idempotency-Replayed: true
 | 502 | `UPLOAD_FAILED` | Storage Provider 明确拒绝或上传失败 | `failed` |
 | 502 | `STORAGE_TIMEOUT` | Storage Provider 请求超时 | `failed` 或 `unknown` |
 | 503 | `UPLOAD_CAPACITY_EXCEEDED` | 并发上传槽位已满 | 无新任务 |
-| 503 | `STORAGE_NOT_CONFIGURED` | 尚未激活存储配置 | 无新任务 |
+| 503 | `STORAGE_NOT_CONFIGURED` | 显式预设没有 active 配置 | 无新任务 |
+| 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 未指定预设且默认预设不可用 | 无新任务 |
 
 容量已满时响应包含：
 
@@ -358,6 +372,7 @@ Host: zos-upload-service:8000
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "request_id": "example-001",
+      "storage_preset": "zos-main",
       "storage_provider": "ctyun_zos",
       "storage_config_revision": 3,
       "filename": "report.pdf",
@@ -380,6 +395,7 @@ Host: zos-upload-service:8000
     {
       "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
       "request_id": "example-002",
+      "storage_preset": "zos-main",
       "storage_provider": "ctyun_zos",
       "storage_config_revision": 3,
       "filename": "archive.zip",
@@ -411,6 +427,7 @@ Host: zos-upload-service:8000
 |---|---|---|
 | `id` | string | 任务 UUID |
 | `request_id` | string | 首次创建任务的请求追踪 ID |
+| `storage_preset` | string | 创建任务时解析并绑定的预设 key |
 | `storage_provider` | string | 创建任务时使用的 Provider |
 | `storage_config_revision` | integer | 创建任务时绑定的配置 revision |
 | `filename` | string | 经过长度限制的原始文件名 |
@@ -448,6 +465,7 @@ Host: zos-upload-service:8000
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "request_id": "example-001",
   "idempotency_key": "ingest-job-20260729-001",
+  "storage_preset": "zos-main",
   "storage_provider": "ctyun_zos",
   "storage_config_revision": 3,
   "filename": "report.pdf",
@@ -499,6 +517,7 @@ X-Request-ID: optional-request-id
 - `X-Delete-Token` 必填，最大 256 个可见 ASCII 字符，必须与该任务首次上传成功时返回的 token 匹配。
 - 请求没有 JSON body，不接受 Bucket、对象 Key、URL、Provider、Endpoint 或 VersionId。
 - 删除目标只由服务端任务记录和任务绑定的原 storage config revision 决定。
+- 预设被禁用、默认项被切换或配置新增 revision 均不改变删除目标。
 - 服务对提交 token 计算 SHA-256，并与任务保存的哈希执行常量时间比较。缺失、格式错误、篡改或跨任务使用统一返回 `403 DELETE_TOKEN_INVALID`。
 - 只有上传状态为 `succeeded` 且对象状态为 `present` 的任务可以开始删除。
 - `legacy_unverified` 历史任务默认没有可用删除凭证，也不可删除。
@@ -623,12 +642,13 @@ Host: zos-upload-service:8000
 检查项：
 
 - 部署级配置和 `SETTINGS_ENCRYPTION_KEY` 已加载。
-- active storage config 已存在并可解密。
+- 唯一、启用的默认预设及其 active storage config 已存在并可解密。
 - SQLite 可读写。
 - 临时目录可写且剩余空间满足阈值。
 - schema 初始化完成。
 - 启动恢复扫描完成。
-- 最近一次 active Storage Provider 探测成功且未超过缓存有效期；`ctyun_zos` 使用 `HeadBucket`。
+- 最近一次默认预设 Storage Provider 探测成功且未超过缓存有效期；`ctyun_zos` 使用 `HeadBucket`。
+- 非默认预设的探测失败在设置页显示为 degraded，不使默认上传的 `/readyz` 失败。
 
 就绪响应：
 
@@ -644,6 +664,7 @@ HTTP/1.1 200 OK
     "config": {
       "status": "ok",
       "configured": true,
+      "storage_preset": "zos-main",
       "provider": "ctyun_zos",
       "provider_schema_version": 1,
       "revision": 3
@@ -687,6 +708,7 @@ HTTP/1.1 503 Service Unavailable
     "config": {
       "status": "ok",
       "configured": true,
+      "storage_preset": "zos-main",
       "provider": "ctyun_zos",
       "provider_schema_version": 1,
       "revision": 3
@@ -728,9 +750,9 @@ HTTP/1.1 503 Service Unavailable
 - `degraded`
 - `error`
 
-没有 active storage config 时，`/readyz` 返回 `503`，`checks.config.status="error"`、`configured=false`，错误码为 `STORAGE_NOT_CONFIGURED`。此时 `/healthz`、Dashboard 和设置接口继续可用。
+没有可用默认预设时，`/readyz` 返回 `503`，`checks.config.status="error"`、`configured=false`，错误码为 `STORAGE_DEFAULT_NOT_CONFIGURED`。此时 `/healthz`、Dashboard 和设置接口继续可用。
 
-`/readyz` 用于编排平台就绪检查。上传调用方在收到 `503 NOT_READY` 或 `503 STORAGE_NOT_CONFIGURED` 时应延迟重试。
+`/readyz` 用于编排平台就绪检查。上传调用方在收到 `503 NOT_READY` 或 `503 STORAGE_DEFAULT_NOT_CONFIGURED` 时应延迟重试。
 
 ## 9. Web Dashboard 页面
 
@@ -757,7 +779,7 @@ Content-Type: text/html; charset=utf-8
 - 页面不加载公网 CDN、远程字体或第三方脚本。
 - 文件名、日志消息和动态字段统一执行 HTML 转义。
 
-页面展示局域网文件接收测试、服务状态、active Provider 与 revision、上传概览、上传流量图、近期上传任务和 `NOTIFY` 及以上日志。接收测试的“真实上传到 ZOS”开关默认关闭；开启后页面改为调用正式 `/v1/uploads`，因此会创建任务并返回对象 Key 与公网 URL。
+页面展示局域网文件接收测试、服务状态、默认预设与 revision、上传概览、上传流量图、近期上传任务和 `NOTIFY` 及以上日志。接收测试的“真实上传到 ZOS”开关默认关闭；开启后页面可选择一个启用预设并调用正式 `/v1/uploads`。
 
 ### 9.2 存储设置页面
 
@@ -768,9 +790,10 @@ Host: zos-upload-service:8000
 
 页面提供：
 
-- Provider 预设选择；第一版只显示“天翼云对象存储 ZOS”。
+- 存储预设列表、新建、编辑、测试、设为默认以及启停非默认预设。
+- Provider 类型选择；第一版只显示“天翼云对象存储 ZOS”。
 - SDK Endpoint（上传接口地址）、Bucket、public base URL、AK、SK、超时、重试、TLS 校验和 Bucket 指标开关。
-- 当前 revision、masked AK、SK 是否配置和最近连接测试结果。
+- 当前预设状态 revision、配置 revision、masked AK、SK 是否配置和最近连接测试结果。
 - “测试连接”和“保存并激活”操作。
 - 当 `public_base_url` 为空时，页面可根据 Bucket 与外网 Endpoint 建议 `https://{bucket}.{endpoint-host}`；用户可以改为控制台显示的 Bucket 外网访问域名、CDN 或自定义域名。
 
@@ -778,9 +801,9 @@ AK/SK 输入框使用密码类型并关闭自动填充，页面加载时不回�
 
 ## 10. Dashboard 存储设置
 
-设置 API 采用稳定的 `provider + provider_schema_version + config + credentials` envelope。第一版只实现 `ctyun_zos`；未来增加其他对象存储时，可以增加新的 Provider adapter、preset 和 schema，上传 API 保持不变。
+设置 API 采用稳定的 `provider + provider_schema_version + config + credentials` envelope。一个存储预设固定绑定一份配置，即一个 Provider、Endpoint、Bucket 和公网访问根地址。
 
-### 10.1 查询 Provider 预设
+### 10.1 查询 Provider 类型
 
 ```http
 GET /v1/settings/storage/providers HTTP/1.1
@@ -870,9 +893,135 @@ Host: zos-upload-service:8000
 }
 ```
 
-Dashboard 使用该接口渲染 Provider 设置表单。`items[].schema_version` 在测试和保存请求中作为 `provider_schema_version` 提交。`label`、`hint` 和 `suggested_value_template` 仅用于界面展示，服务端仍按 Provider schema 校验实际值。调用方应忽略未知 Provider 和未知字段。
+Dashboard 使用该接口渲染 Provider 设置表单。这里的 Provider 类型不是上传可选的存储预设；上传可选项由 `/v1/settings/storage/presets` 返回。
 
-### 10.2 查询当前设置
+### 10.2 管理存储预设
+
+#### 10.2.1 查询预设列表
+
+```http
+GET /v1/settings/storage/presets HTTP/1.1
+Host: zos-upload-service:8000
+```
+
+```json
+{
+  "items": [
+    {
+      "preset_key": "zos-main",
+      "display_name": "主资料库",
+      "enabled": true,
+      "is_default": true,
+      "state_revision": 2,
+      "provider": "ctyun_zos",
+      "provider_schema_version": 1,
+      "config_revision": 4,
+      "endpoint_host": "jiangsu-10.zos.ctyun.cn",
+      "bucket": "main-assets",
+      "last_connection_test": {
+        "status": "ok",
+        "tested_at": "2026-07-31T02:00:00Z",
+        "latency_ms": 82
+      },
+      "created_at": "2026-07-30T01:00:00Z",
+      "updated_at": "2026-07-31T02:00:01Z"
+    }
+  ]
+}
+```
+
+列表不返回完整 Endpoint、public base URL 或 masked 凭证；编辑页面通过详情接口取得这些字段。
+
+#### 10.2.2 创建预设
+
+```http
+POST /v1/settings/storage/presets HTTP/1.1
+Content-Type: application/json
+X-Settings-Request: true
+```
+
+```json
+{
+  "preset_key": "zos-archive",
+  "display_name": "归档资料库",
+  "provider": "ctyun_zos",
+  "provider_schema_version": 1,
+  "config": {
+    "endpoint_url": "https://jiangsu-10.zos.ctyun.cn",
+    "bucket": "archive-assets",
+    "public_base_url": "https://archive-assets.jiangsu-10.zos.ctyun.cn",
+    "connect_timeout_seconds": 5,
+    "read_timeout_seconds": 300,
+    "max_attempts": 2,
+    "verify_tls": true,
+    "enable_bucket_metrics": false
+  },
+  "credentials": {
+    "access_key": "candidate-access-key",
+    "secret_key": "candidate-secret-key"
+  }
+}
+```
+
+服务先执行 `HeadBucket`，成功后创建启用的预设及配置 revision 1。第一个预设自动成为默认项；后续预设默认不是默认项。成功返回 `201`、`state_revision=1` 和完整非敏感详情。`preset_key` 创建后不可修改，也不提供 `DELETE` 接口。
+
+#### 10.2.3 查询单个预设
+
+```http
+GET /v1/settings/storage/presets/zos-archive HTTP/1.1
+```
+
+成功响应在列表字段基础上增加完整 `config`、masked `credentials` 和 `activated_at`，结构与本章默认设置响应相同。
+
+#### 10.2.4 更新预设配置
+
+```http
+PUT /v1/settings/storage/presets/zos-archive HTTP/1.1
+Content-Type: application/json
+X-Settings-Request: true
+```
+
+请求使用本章“保存并激活设置”的 envelope，并提交该预设当前的 `expected_revision`。测试成功后只为目标预设创建新 revision；其他预设和默认项不变。在途任务继续使用旧 revision。
+
+#### 10.2.5 修改显示名或启用状态
+
+```http
+PATCH /v1/settings/storage/presets/zos-archive HTTP/1.1
+Content-Type: application/json
+X-Settings-Request: true
+```
+
+```json
+{
+  "expected_state_revision": 1,
+  "display_name": "冷数据归档",
+  "enabled": false
+}
+```
+
+至少提交一个可修改字段。`preset_key` 不可修改。成功后 `state_revision` 加 1；版本不匹配返回 `409 PRESET_STATE_CONFLICT`。当前默认预设不能直接禁用，必须先切换默认项。禁用只阻止新上传，历史任务的恢复与删除仍使用原 `storage_config_id`。
+
+#### 10.2.6 切换默认预设
+
+```http
+PUT /v1/settings/storage/default HTTP/1.1
+Content-Type: application/json
+X-Settings-Request: true
+```
+
+```json
+{
+  "preset_key": "zos-archive",
+  "expected_default_preset": "zos-main",
+  "expected_state_revision": 1
+}
+```
+
+目标必须存在且已启用。服务在单个事务内切换唯一默认项；并发条件不匹配返回 `409 DEFAULT_PRESET_CONFLICT`。切换只影响之后未携带 `X-Storage-Preset` 的新任务，不改变在途任务、历史任务或幂等重放。
+
+所有预设管理响应都使用 `Cache-Control: no-store`。第一版不提供硬删除、批量修改、负载均衡、权重、自动故障转移或失败回退。
+
+### 10.3 查询默认设置（兼容接口）
 
 ```http
 GET /v1/settings/storage HTTP/1.1
@@ -884,6 +1033,11 @@ Host: zos-upload-service:8000
 ```json
 {
   "configured": true,
+  "preset_key": "zos-main",
+  "display_name": "主资料库",
+  "enabled": true,
+  "is_default": true,
+  "state_revision": 2,
   "provider": "ctyun_zos",
   "provider_schema_version": 1,
   "revision": 3,
@@ -916,6 +1070,7 @@ Host: zos-upload-service:8000
 ```json
 {
   "configured": false,
+  "preset_key": null,
   "provider": null,
   "provider_schema_version": null,
   "revision": 0,
@@ -930,9 +1085,9 @@ Host: zos-upload-service:8000
 }
 ```
 
-响应不会包含 AK、SK 明文或密文。
+该接口是默认预设详情的兼容别名。响应不会包含 AK、SK 明文或密文。
 
-### 10.3 ZOS 设置字段
+### 10.4 ZOS 设置字段
 
 设置 envelope 的 `provider_schema_version` 对 `ctyun_zos` 第一版固定为 `1`。`ctyun_zos` 的完整 `config`：
 
@@ -958,7 +1113,7 @@ Host: zos-upload-service:8000
 
 天翼云 Bucket 外网访问域名通常采用 `协议://BucketName.Endpoint`。服务仍要求显式保存 `public_base_url`，以兼容内网 Endpoint、CDN 和自定义域名。
 
-### 10.4 测试候选设置
+### 10.5 测试候选设置
 
 ```http
 POST /v1/settings/storage/test HTTP/1.1
@@ -969,6 +1124,7 @@ X-Settings-Request: true
 
 ```json
 {
+  "preset_key": "zos-archive",
   "provider": "ctyun_zos",
   "provider_schema_version": 1,
   "config": {
@@ -991,7 +1147,8 @@ X-Settings-Request: true
 规则：
 
 - 请求不写入数据库，也不切换 active revision。
-- 已有配置且 Provider、`provider_schema_version` 与 `endpoint_url` 均保持不变时，可以省略整个 `credentials` 对象或其中一个字段，服务使用当前已保存凭证补齐。
+- `preset_key` 可选；传入时可以复用该预设的现有凭证，未传时使用默认预设作为合并上下文。候选 Endpoint 改变时仍必须提交完整 AK/SK。
+- 已有配置且 Provider、`provider_schema_version` 与 `endpoint_url` 均保持不变时，可以省略整个 `credentials` 对象或其中一个字段。
 - 首次配置以及 Provider、`provider_schema_version` 或 `endpoint_url` 发生变化时，必须同时提供 AK 和 SK。
 - 服务校验 `provider_schema_version` 与 Provider schema，创建候选 Client，并调用 `HeadBucket`。
 - `HeadBucket` 成功表示 Endpoint 可达、签名凭证被接受且 Bucket 可访问。
@@ -1051,7 +1208,7 @@ HTTP/1.1 502 Bad Gateway
 }
 ```
 
-### 10.5 保存并激活设置
+### 10.6 保存并激活默认设置（兼容接口）
 
 ```http
 PUT /v1/settings/storage HTTP/1.1
@@ -1087,6 +1244,8 @@ X-Settings-Request: true
 - 首次配置固定为 `0`。
 - 更新时必须等于 GET 当前设置返回的 `revision`。
 - 不一致时返回 `409 CONFIG_REVISION_CONFLICT`，服务不执行测试或保存。
+
+该接口是 `PUT /v1/settings/storage/presets/{当前默认 preset_key}` 的兼容别名，只更新当前默认预设的配置，不切换默认项。数据库尚无任何预设时，首次 `expected_revision=0` 会创建 `preset_key=default`、显示名“默认 ZOS”的启用默认预设。
 
 保存流程：
 
@@ -1133,18 +1292,23 @@ X-Settings-Request: true
 
 测试、加密、数据库事务或 Client 切换失败时，旧 active revision 保持有效。历史 revision 不通过本 API 删除。
 
-### 10.6 设置错误码
+### 10.7 设置错误码
 
 | HTTP | `code` | 说明 |
 |---:|---|---|
 | 400 | `STORAGE_CONFIG_INVALID` | Provider、schema version、URL、Bucket、凭证格式或连接参数不合法 |
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/schema version/Endpoint 变化时缺少完整 AK/SK |
+| 400 | `STORAGE_PRESET_INVALID` | `preset_key` 格式不合法 |
+| 404 | `STORAGE_PRESET_NOT_FOUND` | 指定预设不存在 |
 | 409 | `CONFIG_REVISION_CONFLICT` | `expected_revision` 已过期 |
+| 409 | `PRESET_STATE_CONFLICT` | `expected_state_revision` 已过期，或试图禁用当前默认预设 |
+| 409 | `DEFAULT_PRESET_CONFLICT` | 默认项并发条件不匹配，或目标预设未启用 |
 | 500 | `SETTINGS_STORAGE_ERROR` | 凭证加密、数据库写入或 Client 切换失败 |
 | 502 | `STORAGE_ENDPOINT_UNREACHABLE` | Endpoint 无法连接、DNS 失败或 TLS 失败 |
 | 502 | `STORAGE_CREDENTIALS_REJECTED` | AK/SK 无效、失效或被拒绝 |
 | 502 | `STORAGE_BUCKET_UNAVAILABLE` | Bucket 不存在或当前凭证无访问权限 |
-| 503 | `STORAGE_NOT_CONFIGURED` | 上传请求发生时尚未激活任何配置 |
+| 503 | `STORAGE_NOT_CONFIGURED` | 指定预设尚未激活配置 |
+| 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 没有可用默认预设 |
 
 设置错误响应不会回显候选 AK/SK，也不会把 SDK 原始请求签名写入 `message` 或诊断字段。
 
@@ -1384,21 +1548,22 @@ Host: zos-upload-service:8000
 ### 14.1 请求
 
 ```http
-GET /v1/dashboard/storage?from=2026-07-28T00%3A00%3A00Z&to=2026-07-29T00%3A00%3A00Z HTTP/1.1
+GET /v1/dashboard/storage?preset_key=zos-main&from=2026-07-28T00%3A00%3A00Z&to=2026-07-29T00%3A00%3A00Z HTTP/1.1
 Host: zos-upload-service:8000
 ```
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
+| `preset_key` | string | 否 | 当前默认预设 | 查询哪个启用预设对应 Bucket 的指标 |
 | `from` | datetime | 否 | 当前时间前 24 小时 | Provider Statistics 开始时间 |
 | `to` | datetime | 否 | 当前时间 | Provider Statistics 结束时间 |
 
 规则：
 
 - 最大范围为 31 天。
-- 时间以 UTC 传给 active Storage Provider；`ctyun_zos` 调用 ZOS Statistics。
+- 时间以 UTC 传给目标预设的 active Storage Provider；`ctyun_zos` 调用 ZOS Statistics。
 - 结果默认缓存 300 秒。
-- 该接口由 active storage config 的 `enable_bucket_metrics` 控制。
+- 该接口由目标预设 active storage config 的 `enable_bucket_metrics` 控制。
 - Provider 原生指标属于整个 Bucket，可能包含绕过本服务写入或读取的对象和请求。
 - Dashboard 的本服务上传流量以 SQLite 统计为准。
 
@@ -1412,6 +1577,7 @@ HTTP/1.1 200 OK
 {
   "enabled": false,
   "status": "disabled",
+  "storage_preset": "zos-main",
   "provider": "ctyun_zos",
   "provider_schema_version": 1,
   "storage_config_revision": 3,
@@ -1431,6 +1597,7 @@ HTTP/1.1 200 OK
 {
   "enabled": true,
   "status": "ok",
+  "storage_preset": "zos-main",
   "provider": "ctyun_zos",
   "provider_schema_version": 1,
   "storage_config_revision": 3,
@@ -1614,7 +1781,7 @@ present ──开始删除──> deleting
 - 周期恢复默认每 60 秒重试 `unknown` 和超过陈旧阈值的 `uploading` 任务。
 - 周期恢复同时扫描 `delete_unknown` 和超过删除陈旧阈值的 `deleting` 任务；确认目标不存在时更新为 `deleted`，确认原对象仍存在时恢复为 `present`。
 
-旧 revision 的凭证失效且当前 active revision 指向同一 Provider、Endpoint 和 Bucket 时，恢复器可以使用 active revision 再尝试一次。
+旧 revision 的凭证失效且同一预设的当前 active revision 指向相同 Provider、Endpoint 和 Bucket 时，恢复器可以使用该 revision 再尝试一次；不得改用默认预设或其他预设。
 
 正常上传在 Provider 上传方法成功返回后执行 `HeadObject`，取得严格删除所需元数据后才返回 `201` 和 `delete_token`。
 
@@ -1661,6 +1828,7 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - 唯一性范围为当前服务实例使用的任务数据库。
 - 幂等保证持续到对应任务记录被保留策略删除，默认最长保留 180 天。
 - 幂等键绑定第一次请求意图，服务不读取完整文件来比较重复请求内容。
+- 幂等键绑定第一次新任务解析得到的 `storage_preset`。
 
 ### 16.2 各状态行为
 
@@ -1673,6 +1841,8 @@ Idempotency-Key: opaque-key-up-to-128-chars
 
 失败任务需要新的幂等键才能发起新的上传。
 
+重放请求未携带 `X-Storage-Preset` 时，始终按原任务返回，不受当前默认项变化影响。重放请求显式提交与原任务不同的预设时返回 `409 IDEMPOTENCY_SCOPE_MISMATCH`，不读取文件体、不创建任务。
+
 ### 16.3 未传幂等键
 
 每次 `POST /v1/uploads` 都会生成新的任务 UUID 和对象 Key。同一个文件重复上传会产生不同任务和 URL。
@@ -1682,6 +1852,7 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - 收到 `201` 或幂等重放 `200`：保存结果，停止重试。
 - 收到 `409 UPLOAD_IN_PROGRESS`：查询返回的 `task_id`，等待任务进入终态。
 - 收到 `409 IDEMPOTENCY_KEY_REUSED`：确认业务意图后使用新幂等键。
+- 收到 `409 IDEMPOTENCY_SCOPE_MISMATCH`：使用原预设重放，或为新的目标预设使用新幂等键。
 - 收到 `503 UPLOAD_CAPACITY_EXCEEDED`：遵循 `Retry-After`。
 - 客户端等待响应时发生网络超时：使用相同幂等键重新请求，或先查询已知 `task_id`。
 - 未使用幂等键的自动重试会产生重复对象风险。
@@ -1696,11 +1867,17 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 400 | `FILE_REQUIRED` | 新上传缺少 `file` 字段 |
 | 400 | `FILE_EMPTY` | 文件内容为空 |
 | 400 | `BAD_REQUEST` | 请求头、multipart、UUID、时间或查询参数错误 |
+| 400 | `STORAGE_PRESET_INVALID` | `preset_key` 或 `X-Storage-Preset` 格式不合法 |
 | 400 | `STORAGE_CONFIG_INVALID` | Provider、schema version、设置字段、URL、Bucket、凭证格式或参数不合法 |
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/schema version/Endpoint 变化时缺少完整 AK/SK |
 | 403 | `DELETE_TOKEN_INVALID` | 删除凭证缺失、错误或与任务不匹配 |
 | 404 | `TASK_NOT_FOUND` | 指定任务不存在 |
+| 404 | `STORAGE_PRESET_NOT_FOUND` | 指定存储预设不存在 |
 | 409 | `CONFIG_REVISION_CONFLICT` | 设置更新基于过期 revision |
+| 409 | `PRESET_STATE_CONFLICT` | 预设状态更新冲突或试图禁用默认预设 |
+| 409 | `DEFAULT_PRESET_CONFLICT` | 默认项切换的并发条件不匹配或目标未启用 |
+| 409 | `STORAGE_PRESET_DISABLED` | 上传显式指定了已禁用预设 |
+| 409 | `IDEMPOTENCY_SCOPE_MISMATCH` | 幂等键已绑定其他存储预设 |
 | 409 | `UPLOAD_IN_PROGRESS` | 幂等键对应任务仍在处理或待确认 |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | 幂等键已经绑定失败任务 |
 | 409 | `OBJECT_NOT_DELETABLE` | 任务或对象状态不允许严格删除 |
@@ -1717,7 +1894,8 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 502 | `STORAGE_CREDENTIALS_REJECTED` | 设置测试中的 AK/SK 被拒绝 |
 | 502 | `STORAGE_BUCKET_UNAVAILABLE` | 设置测试无法访问 Bucket |
 | 503 | `UPLOAD_CAPACITY_EXCEEDED` | 上传并发槽位已满 |
-| 503 | `STORAGE_NOT_CONFIGURED` | 尚未激活存储配置 |
+| 503 | `STORAGE_NOT_CONFIGURED` | 显式预设尚未激活配置，或兼容设置接口没有默认配置 |
+| 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 未指定预设且没有可用默认预设 |
 | 503 | `STORAGE_CONFIG_UNAVAILABLE` | 删除任务绑定的原配置无法加载或解密 |
 | 503 | `NOT_READY` | 服务依赖项未达到就绪条件 |
 | 503 | `STORAGE_METRICS_UNAVAILABLE` | 可选 Storage Provider 原生指标暂时不可用且无缓存 |
@@ -1733,6 +1911,7 @@ curl --fail-with-body \
   -X POST \
   -H 'X-Request-ID: example-001' \
   -H 'Idempotency-Key: ingest-job-20260729-001' \
+  -H 'X-Storage-Preset: zos-main' \
   -F 'file=@./report.pdf;type=application/pdf' \
   http://zos-upload-service:8000/v1/uploads
 ```
@@ -1789,14 +1968,21 @@ curl --fail-with-body \
   'http://zos-upload-service:8000/v1/dashboard/logs?min_level=ERROR&limit=100'
 ```
 
-### 18.9 查询当前存储设置
+### 18.9 查询存储预设
+
+```bash
+curl --fail-with-body \
+  'http://zos-upload-service:8000/v1/settings/storage/presets'
+```
+
+### 18.10 查询当前默认存储设置
 
 ```bash
 curl --fail-with-body \
   'http://zos-upload-service:8000/v1/settings/storage'
 ```
 
-### 18.10 测试 ZOS 候选设置
+### 18.11 测试 ZOS 候选设置
 
 ```bash
 curl --fail-with-body \
@@ -1807,7 +1993,7 @@ curl --fail-with-body \
   'http://zos-upload-service:8000/v1/settings/storage/test'
 ```
 
-### 18.11 保存并激活 ZOS 设置
+### 18.12 保存并激活默认 ZOS 设置
 
 ```bash
 curl --fail-with-body \
@@ -1818,7 +2004,7 @@ curl --fail-with-body \
   'http://zos-upload-service:8000/v1/settings/storage'
 ```
 
-### 18.12 查询 Provider 原生指标
+### 18.13 查询 Provider 原生指标
 
 ```bash
 curl --fail-with-body \
@@ -1828,6 +2014,8 @@ curl --fail-with-body \
 ## 19. 调用方注意事项
 
 - 上传请求使用 `multipart/form-data`，字段名固定为 `file`。
+- 需要特定 Endpoint 与 Bucket 时提交服务端预先分配的 `X-Storage-Preset`；不要在请求中传原始存储参数。
+- 未传 `X-Storage-Preset` 时使用当前默认项；显式预设失败不会自动回退。
 - 文件内容直接放入 multipart，避免 Base64 编码和 JSON 包装。
 - 接近 200 MiB 的文件需要预留足够客户端超时时间。
 - `url` 作为不透明字符串保存和传递。
