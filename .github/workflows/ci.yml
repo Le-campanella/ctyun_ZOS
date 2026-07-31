@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build test image
+        run: docker build --target test -t zos-upload-service:test .
+      - name: Run tests
+        run: docker run --rm zos-upload-service:test
+      - name: Build runtime image
+        run: docker build --target runtime -t zos-upload-service:runtime .

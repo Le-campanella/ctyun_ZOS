@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import threading
@@ -67,6 +68,16 @@ class Runtime:
         }
         self._stop = asyncio.Event()
         self._background: list[asyncio.Task] = []
+        self.background_enabled = False
+        self.background_status = {
+            name: {
+                "status": "pending",
+                "last_success_at": None,
+                "last_error_at": None,
+                "error_code": None,
+            }
+            for name in ("probe", "recovery", "maintenance")
+        }
 
     async def start(self, background: bool = True) -> None:
         self.settings.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -87,13 +98,33 @@ class Runtime:
         await self._bootstrap_storage()
         self._load_active()
         await self.recover()
+        self._background_succeeded("recovery")
         await self.probe()
+        self._background_succeeded("probe")
         self.log.emit(NOTIFY, "service_started", "服务已启动")
         if background:
+            self.background_enabled = True
             self._background = [
-                asyncio.create_task(self._probe_loop()),
-                asyncio.create_task(self._recovery_loop()),
-                asyncio.create_task(self._maintenance_loop()),
+                asyncio.create_task(
+                    self._supervise(
+                        "probe",
+                        self.probe,
+                        self.settings.storage_probe_interval_seconds,
+                    ),
+                    name="storage-probe",
+                ),
+                asyncio.create_task(
+                    self._supervise(
+                        "recovery",
+                        self.recover,
+                        self.settings.recovery_retry_seconds,
+                    ),
+                    name="task-recovery",
+                ),
+                asyncio.create_task(
+                    self._supervise("maintenance", self._maintain, 86_400),
+                    name="database-maintenance",
+                ),
             ]
 
     async def stop(self) -> None:
@@ -792,6 +823,11 @@ class Runtime:
             },
             "storage": storage,
         }
+        if self.background_enabled:
+            checks["background"] = self.background_status
+        background_ok = not self.background_enabled or all(
+            item["status"] == "ok" for item in self.background_status.values()
+        )
         ready = (
             snapshot is not None
             and database["status"] == "ok"
@@ -799,26 +835,49 @@ class Runtime:
             and self.schema_ready
             and self.recovery_complete
             and probe_ok
+            and background_ok
         )
         code = "STORAGE_NOT_CONFIGURED" if snapshot is None else "NOT_READY"
         return ready, checks, code
 
-    async def _probe_loop(self) -> None:
-        while not self._stop.is_set():
-            await asyncio.sleep(self.settings.storage_probe_interval_seconds)
-            await self.probe()
+    def _background_succeeded(self, name: str) -> None:
+        self.background_status[name].update(
+            status="ok",
+            last_success_at=utc_now(),
+            error_code=None,
+        )
 
-    async def _recovery_loop(self) -> None:
-        while not self._stop.is_set():
-            await asyncio.sleep(self.settings.recovery_retry_seconds)
-            await self.recover()
+    async def _maintain(self) -> None:
+        await anyio.to_thread.run_sync(
+            self.database.maintain,
+            self.settings.task_retention_days,
+            self.settings.log_retention_days,
+            self.settings.log_max_rows,
+        )
 
-    async def _maintenance_loop(self) -> None:
+    async def _supervise(self, name: str, operation: Any, interval: float) -> None:
         while not self._stop.is_set():
-            await anyio.to_thread.run_sync(
-                self.database.maintain,
-                self.settings.task_retention_days,
-                self.settings.log_retention_days,
-                self.settings.log_max_rows,
-            )
-            await asyncio.sleep(86_400)
+            delay = interval
+            try:
+                await operation()
+                self._background_succeeded(name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.background_status[name].update(
+                    status="error",
+                    last_error_at=utc_now(),
+                    error_code="BACKGROUND_TASK_FAILED",
+                )
+                self.log.emit(
+                    logging.CRITICAL,
+                    "background_task_failed",
+                    f"后台任务 {name} 执行失败，将自动重试",
+                    error_code="BACKGROUND_TASK_FAILED",
+                    details={"task": name, "exception": type(exc).__name__},
+                )
+                delay = min(interval, 60)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+            except TimeoutError:
+                pass

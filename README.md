@@ -9,6 +9,7 @@
 - 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API。上传接口可通过 `X-Storage-Preset` 选择已启用预设，未传时使用默认项。
 - Dashboard 设置页已支持多预设创建、测试、更新、启停和默认切换；监控页可选择预设执行真实上传测试，并只读展示对象与删除状态。
 - `DELETE /v1/upload-tasks/{task_id}/object` 已开放严格删除：只接受任务级 `X-Delete-Token`，使用任务原配置校验对象元数据、精确删除 VersionId 并再次确认对象不存在。
+- 后台探测、恢复和维护任务由 supervisor 自动重试；任一后台任务异常时 `/readyz` 降级并记录 CRITICAL 日志。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 仍是未发布目标契约；仓库实现已推进到 Dashboard v3，正式生产行为以部署版本为准。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 
@@ -120,23 +121,22 @@ docker run --rm zos-upload-service:test
 
 ## 部署到局域网服务器
 
-默认通过 SSH 部署到 `liyang@192.168.1.150:~/services/ctyun_ZOS`。服务器需要安装 Docker
-和 Compose，并允许 `liyang` 直接使用 Docker。首次部署前授权本机部署密钥：
+服务器需要安装 Docker 和 Compose，并允许部署用户直接使用 Docker。复制本地部署配置：
 
 ```bash
-ssh-copy-id -i ~/.ssh/id_ed25519_ctyun_zos.pub liyang@192.168.1.150
+cp .deploy.env.example .deploy.env
+```
+
+填写目标、远程目录、健康/就绪 URL 和 SSH 私钥绝对路径后执行：
+
+```bash
 ./deploy.sh
 ```
 
-脚本只部署已提交代码，以当前 Git commit 标记并传输镜像，随后重建容器并检查
-`http://192.168.1.150:8000/healthz`。首次执行会在服务器生成 `.env` 后停止；填写
-`SETTINGS_ENCRYPTION_KEY` 和 `LISTEN_IP=192.168.1.150`，再执行一次即可。
-
-临时覆盖目标或健康检查地址：
-
-```bash
-DEPLOY_TARGET=user@host DEPLOY_HEALTH_URL=http://host:8000/healthz ./deploy.sh
-```
+脚本只部署已提交代码。部署前运行完整测试和生产镜像构建，使用 SQLite Online Backup
+保存远程数据库并记录 schema；部署后依次检查 `/healthz` 和 `/readyz`。检查失败时回滚
+旧镜像；跨 schema 升级还会恢复迁移前数据库，备份继续保留在数据库卷的
+`deploy-backups/` 目录。
 
 部署不会覆盖服务器 `.env`，也不会删除 `ctyun_zos` 项目的数据库和临时文件卷。
 
@@ -147,6 +147,18 @@ DEPLOY_TARGET=user@host DEPLOY_HEALTH_URL=http://host:8000/healthz ./deploy.sh
 3. 从公网环境实际访问返回 URL。
 4. 错误 Endpoint、凭证和 Bucket 能返回明确错误。
 5. 重启后未决任务可通过 HeadObject 恢复。
+
+可重复的真实 ZOS 上传、公网 HEAD 和严格删除验收：
+
+```bash
+ACCEPT_BASE_URL=http://<内网IP>:8000 \
+ACCEPT_SIZE_MIB=20 \
+ACCEPT_CONCURRENCY=4 \
+./scripts/accept-zos.sh
+```
+
+默认使用当前默认预设；可通过 `ACCEPT_PRESET` 指定已启用预设。脚本只删除自己刚上传且
+持有对应一次性 token 的对象，不输出删除 token。
 
 ## 运维边界
 

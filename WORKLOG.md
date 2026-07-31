@@ -33,10 +33,10 @@
 - 2026-07-29：接收测试区增加默认关闭的真实上传开关；开启后复用正式上传接口并显示其响应。
 - 2026-07-29：真实 ZOS 诊断确认 botocore 默认 checksum 导致 `XAmzContentSHA256Mismatch`；Provider 永久改为 `when_required`，上传对象固定使用 `public-read` ACL。
 - 2026-07-29：通过正式 `/v1/uploads` 上传 `k3_tech_report.pdf` 验证成功；任务状态为 `succeeded`，匿名公网 HEAD 返回 200，大小 `1795077` 且 Content-Type 为 `application/pdf`。
-- 2026-07-30：增加面向 `liyang@192.168.1.150:~/services/ctyun_ZOS` 的 SSH 部署脚本；本地测试、按 Git commit 构建镜像、传输、Compose 重建和健康检查由单条命令完成。
+- 2026-07-30：增加面向局域网 Linux 服务器的 SSH 部署脚本；本地测试、按 Git commit 构建镜像、传输、Compose 重建和健康检查由单条命令完成。
 - 2026-07-30：Compose 镜像标签支持 `IMAGE_TAG`，服务器 `.env` 与持久卷不会被部署覆盖。
 - 2026-07-30：完成首次局域网服务器部署；版本 `f38067ee0934` 容器健康，Dashboard 返回 200，数据库与临时文件持久卷已创建。
-- 2026-07-30：在目标服务器安装 Portainer CE LTS 2.39.5，通过 `192.168.1.150:9443` 管理 Docker，配置独立持久卷和自动重启。
+- 2026-07-30：在目标服务器安装 Portainer CE LTS 2.39.5，通过局域网 HTTPS 管理 Docker，配置独立持久卷和自动重启。
 - 2026-07-30：将本机 19 条历史上传任务幂等合并到远程数据库，保留远程配置和 2 条新任务；合并后共 21 条，SQLite 完整性与 ZOS 就绪检查通过。
 
 ## 进行中
@@ -74,6 +74,10 @@
 - 2026-07-31：Dashboard 真实上传测试可选择已启用预设；服务状态显示默认预设，任务列表显示预设、ETag、VersionId、对象状态与删除状态。
 - 2026-07-31：Dashboard 保持删除状态只读，不保存凭证、不展示删除 token、不增加高风险删除操作；前端继续只用本地原生 JavaScript 和 DOM `textContent`。
 - 2026-07-31：Dashboard v3 前端语法与静态安全检查通过，完整容器测试仍为 60 项全部通过，生产镜像 `ctyun-zos-upload:commit10` 构建成功。
+- 2026-07-31：真实环境验收前确认远程仍运行 `f38067ee0934`、schema v1、21 条任务；健康和 ZOS 就绪状态正常，因此先建立跨 schema 安全部署链路。
+- 2026-07-31：后台探测、恢复和维护循环增加统一 supervisor；异常写入 CRITICAL、就绪状态降级并自动重试，取消时干净退出。
+- 2026-07-31：部署配置移入被忽略的 `.deploy.env`；部署增加完整测试、运行镜像构建、远程 SQLite Online Backup、schema 识别、health/ready 检查及跨 schema 失败回滚。
+- 2026-07-31：增加最小 GitHub Actions 容器 CI 和真实 ZOS 并发上传、公网 HEAD、严格删除验收脚本；共 62 个自动测试通过。
 
 ## 尚未完成
 
@@ -82,4 +86,4 @@
 
 ## 下一步
 
-进入下一阶段：完成真实 ZOS 压力与故障验收，并补齐生产部署的 HTTPS、访问控制和备份。
+提交可靠性与部署改动后，将远程 schema v1 安全迁移到 v3，并执行真实 ZOS multipart、并发上传、公网访问、严格删除和重启验收。

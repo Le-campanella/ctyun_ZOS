@@ -15,6 +15,8 @@ FROM base AS test
 COPY requirements-dev.txt .
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY tests ./tests
+COPY deploy.sh .
+COPY scripts ./scripts
 
 CMD ["python", "-m", "pytest", "-q"]
 

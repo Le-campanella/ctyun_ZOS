@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -19,7 +20,13 @@ from app.database import (
     utc_now,
 )
 from app.eventlog import EventLogger, NOTIFY
-from app.providers import CtyunZosProvider, ObjectMetadata, ProviderError
+from app.providers import (
+    CtyunZosProvider,
+    ObjectMetadata,
+    ProviderError,
+    ProviderRegistry,
+)
+from app.runtime import Runtime
 from app.security import (
     CredentialCipher,
     hash_delete_token,
@@ -87,6 +94,31 @@ def test_delete_tokens_have_256_bits_and_only_hashes_need_persisting():
     assert matches_delete_token(first, first_hash)
     assert not matches_delete_token(second, first_hash)
     assert not matches_delete_token(None, first_hash)
+
+
+def test_background_supervisor_reports_failure_and_recovers(settings, database):
+    runtime = Runtime(settings, ProviderRegistry(), database)
+    attempts = 0
+
+    async def exercise():
+        nonlocal attempts
+
+        async def flaky():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("injected")
+            runtime._stop.set()
+
+        await runtime._supervise("maintenance", flaky, 0.01)
+
+    asyncio.run(exercise())
+
+    assert attempts == 2
+    assert runtime.background_status["maintenance"]["status"] == "ok"
+    logs = database.list_logs(min_level=logging.CRITICAL, limit=10)
+    assert logs[0]["event"] == "background_task_failed"
+    assert "injected" not in logs[0]["message"]
 
 
 def test_database_schema_activation_and_revision_conflict(database: Database, settings):
