@@ -47,11 +47,17 @@ class ObjectMetadata:
     last_modified: str | None
 
 
-def require_matching_size(metadata: ObjectMetadata, expected_size: int) -> None:
+def require_upload_metadata(metadata: ObjectMetadata, expected_size: int) -> None:
     if metadata.size_bytes != expected_size:
         raise ProviderError(
             "OBJECT_SIZE_MISMATCH",
             "远端对象大小与接收文件不一致",
+            uncertain=True,
+        )
+    if not metadata.etag:
+        raise ProviderError(
+            "UPLOAD_CONFIRMATION_FAILED",
+            "Storage Provider 返回的对象元数据不完整",
             uncertain=True,
         )
 

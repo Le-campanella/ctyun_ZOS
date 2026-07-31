@@ -255,6 +255,7 @@
         headers: { Accept: "application/json" },
       });
       const body = await response.json();
+      if (body.delete_token) body.delete_token = "[REDACTED]";
       result.value = JSON.stringify(body, null, 2);
     } catch (error) {
       result.value = JSON.stringify({ error: { message: error.message } }, null, 2);

@@ -483,7 +483,7 @@ class Database:
         with closing(self.connect()) as connection:
             row = connection.execute(
                 """
-                SELECT c.* FROM storage_configs c
+                SELECT c.*, p.preset_key FROM storage_configs c
                 JOIN storage_presets p ON p.id=c.preset_id
                 WHERE c.status='active' AND p.enabled=1 AND p.is_default=1
                 """
@@ -500,7 +500,7 @@ class Database:
     def activate_storage(self, record: dict[str, Any], expected_revision: int) -> dict:
         with self.transaction() as connection:
             preset = connection.execute(
-                "SELECT id FROM storage_presets WHERE is_default=1"
+                "SELECT id, preset_key FROM storage_presets WHERE is_default=1"
             ).fetchone()
             if preset is None:
                 now = record["created_at"]
@@ -520,6 +520,7 @@ class Database:
                 )
             else:
                 preset_id = preset["id"]
+            preset_key = preset["preset_key"] if preset else "default"
             current = connection.execute(
                 """
                 SELECT revision FROM storage_configs
@@ -560,7 +561,12 @@ class Database:
                     record.get("last_test_latency_ms"),
                 ),
             )
-        record.update(revision=revision, status="active")
+        record.update(
+            preset_id=preset_id,
+            preset_key=preset_key,
+            revision=revision,
+            status="active",
+        )
         return record
 
     def create_task(self, record: dict[str, Any]) -> None:
@@ -594,6 +600,7 @@ class Database:
             "size_bytes",
             "etag",
             "version_id",
+            "delete_token_hash",
             "object_status",
             "error_code",
             "finished_at",
@@ -627,7 +634,14 @@ class Database:
     def task_by_idempotency(self, key: str) -> dict[str, Any] | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
-                "SELECT * FROM upload_tasks WHERE idempotency_key=?", (key,)
+                """
+                SELECT t.*, p.preset_key AS storage_preset
+                FROM upload_tasks t
+                JOIN storage_configs s ON s.id=t.storage_config_id
+                JOIN storage_presets p ON p.id=s.preset_id
+                WHERE t.idempotency_key=?
+                """,
+                (key,),
             ).fetchone()
         return dict(row) if row else None
 

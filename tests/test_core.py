@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet
 from app.database import Database, RevisionConflict, SCHEMA_VERSION, utc_now
 from app.eventlog import EventLogger, NOTIFY
 from app.providers import CtyunZosProvider, ObjectMetadata, ProviderError
-from app.security import CredentialCipher
+from app.security import CredentialCipher, hash_delete_token, issue_delete_token
 
 
 def storage_record(ciphertext: bytes, *, item_id: str | None = None) -> dict:
@@ -61,6 +61,17 @@ def test_cipher_round_trip_and_wrong_key(settings):
     other = CredentialCipher(Fernet.generate_key().decode())
     with pytest.raises(ValueError, match="cannot be decrypted"):
         other.decrypt(encrypted)
+
+
+def test_delete_tokens_have_256_bits_and_only_hashes_need_persisting():
+    first, first_hash = issue_delete_token()
+    second, second_hash = issue_delete_token()
+
+    assert first != second
+    assert len(first_hash) == len(second_hash) == 32
+    assert first_hash == hash_delete_token(first)
+    assert second_hash == hash_delete_token(second)
+    assert first.encode() not in first_hash
 
 
 def test_database_schema_activation_and_revision_conflict(database: Database, settings):
@@ -158,12 +169,22 @@ def test_event_logger_redacts_secrets_and_persists_notify(database: Database, ca
         NOTIFY,
         "config_event",
         "persisted",
-        details={"secret_key": "visible-no", "safe": "yes"},
+        details={
+            "secret_key": "visible-no",
+            "delete_token": "visible-no",
+            "token_hash": "visible-no",
+            "safe": "yes",
+        },
     )
 
     rows = database.list_logs(min_level=NOTIFY, limit=10)
     assert len(rows) == 1
-    assert rows[0]["details"] == {"secret_key": "[REDACTED]", "safe": "yes"}
+    assert rows[0]["details"] == {
+        "secret_key": "[REDACTED]",
+        "delete_token": "[REDACTED]",
+        "token_hash": "[REDACTED]",
+        "safe": "yes",
+    }
     assert "visible-no" not in capsys.readouterr().out
 
 

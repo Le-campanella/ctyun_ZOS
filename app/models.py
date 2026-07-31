@@ -83,10 +83,16 @@ class StorageUpdateRequest(StorageCandidateRequest):
     expected_revision: int = Field(ge=0)
 
 
-class UploadResponseV1(ContractModel):
+class UploadResponse(ContractModel):
     task_id: str
+    storage_preset: str
     key: str
     url: str
+    size_bytes: int
+    content_type: str
+    etag: str | None
+    version_id: str | None
+    delete_token: str | None
 
 
 class ReceiveValidationResponse(ContractModel):

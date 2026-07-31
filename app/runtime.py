@@ -19,7 +19,7 @@ from .providers import (
     ProviderError,
     ProviderRegistry,
     StorageProvider,
-    require_matching_size,
+    require_upload_metadata,
 )
 from .security import CredentialCipher
 
@@ -355,7 +355,7 @@ class Runtime:
                     )
                 else:
                     if task["size_bytes"] is not None:
-                        require_matching_size(metadata, task["size_bytes"])
+                        require_upload_metadata(metadata, task["size_bytes"])
                     self.database.update_task(
                         task["id"],
                         status="succeeded",

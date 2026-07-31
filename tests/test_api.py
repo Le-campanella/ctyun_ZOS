@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+import re
 from threading import Event
 from typing import BinaryIO
 from uuid import uuid4
@@ -18,6 +19,7 @@ from app.providers import (
     ProviderRegistry,
     StorageProvider,
 )
+from app.security import hash_delete_token
 
 
 class FakeProvider(StorageProvider):
@@ -80,7 +82,7 @@ class FakeProvider(StorageProvider):
             return None
         return ObjectMetadata(
             size_bytes=len(value) + self.config.get("head_size_delta", 0),
-            etag='"fake-etag"',
+            etag=None if self.config.get("head_missing_etag") else '"fake-etag"',
             version_id=version_id or self.config.get("version_id"),
             content_type="application/octet-stream",
             last_modified="2026-07-31T00:00:00Z",
@@ -160,11 +162,21 @@ def test_unconfigured_service_still_serves_health_settings_and_dashboard(client)
     assert upload.json()["error"]["code"] == "STORAGE_NOT_CONFIGURED"
 
 
-def test_openapi_and_upload_response_freeze_current_v1_contract(client):
+def test_openapi_and_first_upload_response_contract(client, database):
     schemas = client.get("/openapi.json").json()["components"]["schemas"]
-    assert "UploadResponseV1" in schemas
-    upload_schema = schemas["UploadResponseV1"]
-    assert set(upload_schema["required"]) == {"task_id", "key", "url"}
+    assert "UploadResponse" in schemas
+    upload_schema = schemas["UploadResponse"]
+    assert set(upload_schema["required"]) == {
+        "task_id",
+        "storage_preset",
+        "key",
+        "url",
+        "size_bytes",
+        "content_type",
+        "etag",
+        "version_id",
+        "delete_token",
+    }
     assert upload_schema["additionalProperties"] is False
 
     activate(client)
@@ -173,13 +185,27 @@ def test_openapi_and_upload_response_freeze_current_v1_contract(client):
         files={"file": ("contract.txt", b"contract", "text/plain")},
     )
     assert response.status_code == 201
-    assert set(response.json()) == {"task_id", "key", "url"}
+    body = response.json()
+    assert set(body) == set(upload_schema["required"])
+    assert body["storage_preset"] == "default"
+    assert body["size_bytes"] == 8
+    assert body["content_type"] == "text/plain"
+    assert body["etag"] == '"fake-etag"'
+    assert body["version_id"] is None
+    assert re.fullmatch(r"[A-Za-z0-9_-]{43}", body["delete_token"])
+    assert response.headers["Cache-Control"] == "no-store"
+    with database.connect() as connection:
+        stored_hash = connection.execute(
+            "SELECT delete_token_hash FROM upload_tasks WHERE id=?",
+            (body["task_id"],),
+        ).fetchone()[0]
+    assert stored_hash == hash_delete_token(body["delete_token"])
+    assert body["delete_token"].encode() not in stored_hash
     serialized = response.text.lower()
     for secret_name in (
         "access_key",
         "secret_key",
         "settings_encryption_key",
-        "delete_token",
         "token_hash",
     ):
         assert secret_name not in serialized
@@ -206,6 +232,7 @@ def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     assert 'id="receive-test-real-upload" type="checkbox" role="switch"' in dashboard.text
     assert "/v1/uploads/validate" in dashboard_js.text
     assert 'real ? "/v1/uploads" : "/v1/uploads/validate"' in dashboard_js.text
+    assert 'body.delete_token = "[REDACTED]"' in dashboard_js.text
 
 
 def test_receive_validation_works_unconfigured_without_task_or_storage(client):
@@ -325,7 +352,9 @@ def test_idempotent_success_replay_does_not_upload_twice(client):
     assert first.status_code == 201
     assert second.status_code == 200
     assert second.headers["Idempotency-Replayed"] == "true"
-    assert second.json() == first.json()
+    assert second.headers["Cache-Control"] == "no-store"
+    assert first.json()["delete_token"] is not None
+    assert second.json() == first.json() | {"delete_token": None}
     assert len(FakeProvider.objects) == 1
 
 
@@ -390,6 +419,7 @@ def test_uncertain_upload_is_recoverable_and_hides_url(client):
         ({"head_missing": True}, "UPLOAD_CONFIRMATION_PENDING"),
         ({"head_timeout": True}, "STORAGE_TIMEOUT"),
         ({"head_size_delta": 1}, "OBJECT_SIZE_MISMATCH"),
+        ({"head_missing_etag": True}, "UPLOAD_CONFIRMATION_FAILED"),
     ],
 )
 def test_upload_requires_matching_remote_metadata(client, config, code):

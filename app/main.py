@@ -39,15 +39,16 @@ from .models import (
     StorageUpdateRequest,
     TaskDetailResponse,
     TaskListResponse,
-    UploadResponseV1,
+    UploadResponse,
 )
 from .providers import (
     ProviderError,
     ProviderRegistry,
     default_registry,
-    require_matching_size,
+    require_upload_metadata,
 )
 from .runtime import Runtime
+from .security import issue_delete_token
 
 
 STATUS_VALUES = {"uploading", "unknown", "succeeded", "failed"}
@@ -333,6 +334,22 @@ def _task_item(task: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     return item
 
 
+def _upload_response(
+    task: dict[str, Any], delete_token: str | None = None
+) -> dict[str, Any]:
+    return {
+        "task_id": task["id"],
+        "storage_preset": task["storage_preset"],
+        "key": task["object_key"],
+        "url": task["public_url"],
+        "size_bytes": task["size_bytes"],
+        "content_type": task["content_type"],
+        "etag": task["etag"],
+        "version_id": task["version_id"],
+        "delete_token": delete_token,
+    }
+
+
 def _provider_status(error: ProviderError) -> int:
     if error.code in {"STORAGE_CONFIG_INVALID", "STORAGE_CREDENTIALS_REQUIRED"}:
         return 400
@@ -524,7 +541,7 @@ def create_app(
             spool.close()
             await source.close()
 
-    @app.post("/v1/uploads", response_model=UploadResponseV1)
+    @app.post("/v1/uploads", response_model=UploadResponse)
     async def upload(request: Request):
         runtime: Runtime = request.app.state.runtime
         snapshot = runtime.active_snapshot()
@@ -541,11 +558,8 @@ def create_app(
             if existing:
                 if existing["status"] == "succeeded":
                     response = JSONResponse(
-                        {
-                            "task_id": existing["id"],
-                            "key": existing["object_key"],
-                            "url": existing["public_url"],
-                        }
+                        _upload_response(existing),
+                        headers={"Cache-Control": "no-store"},
                     )
                     response.headers["Idempotency-Replayed"] = "true"
                     return response
@@ -592,11 +606,8 @@ def create_app(
             existing = runtime.database.task_by_idempotency(idempotency)
             if existing and existing["status"] == "succeeded":
                 response = JSONResponse(
-                    {
-                        "task_id": existing["id"],
-                        "key": existing["object_key"],
-                        "url": existing["public_url"],
-                    }
+                    _upload_response(existing),
+                    headers={"Cache-Control": "no-store"},
                 )
                 response.headers["Idempotency-Replayed"] = "true"
                 return response
@@ -682,7 +693,7 @@ def create_app(
                         "上传已返回成功，但暂时无法确认远端对象",
                         uncertain=True,
                     )
-                require_matching_size(metadata, size)
+                require_upload_metadata(metadata, size)
             except ProviderError as exc:
                 runtime.database.update_task(
                     task_id,
@@ -694,6 +705,7 @@ def create_app(
                 )
                 raise APIError(502, exc.code, exc.message, task_id=task_id) from exc
             duration = _duration(request)
+            delete_token, delete_token_hash = issue_delete_token()
             try:
                 runtime.database.update_task(
                     task_id,
@@ -701,6 +713,7 @@ def create_app(
                     size_bytes=metadata.size_bytes,
                     etag=metadata.etag,
                     version_id=metadata.version_id,
+                    delete_token_hash=delete_token_hash,
                     object_status="present",
                     error_code=None,
                     finished_at=utc_now(),
@@ -737,9 +750,16 @@ def create_app(
                     "storage_config_revision": storage["revision"],
                 },
             )
+            task.update(
+                storage_preset=storage.get("preset_key", "default"),
+                size_bytes=metadata.size_bytes,
+                etag=metadata.etag,
+                version_id=metadata.version_id,
+            )
             return JSONResponse(
-                {"task_id": task_id, "key": object_key, "url": public_url},
+                _upload_response(task, delete_token),
                 status_code=201,
+                headers={"Cache-Control": "no-store"},
             )
         finally:
             spool.close()

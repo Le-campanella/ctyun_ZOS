@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import json
+import secrets
+from hashlib import sha256
 
 from cryptography.fernet import Fernet, InvalidToken
+
+
+def hash_delete_token(token: str) -> bytes:
+    return sha256(token.encode("ascii")).digest()
+
+
+def issue_delete_token() -> tuple[str, bytes]:
+    token = secrets.token_urlsafe(32)
+    return token, hash_delete_token(token)
 
 
 class CredentialCipher:

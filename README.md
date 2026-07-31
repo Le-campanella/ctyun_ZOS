@@ -4,7 +4,7 @@
 
 ## 当前发布基线
 
-- 当前 HTTP 契约：API v1，上传成功只返回 `task_id`、`key`、`url`。
+- 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
 - 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
 - 运行行为仍使用自动创建或迁移的 `default` 预设，尚未开放多预设 API。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
@@ -77,12 +77,18 @@ curl -fsS \
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "storage_preset": "default",
   "key": "2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
-  "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf"
+  "url": "https://public-bucket.example.com/2026/07/29/550e8400-e29b-41d4-a716-446655440000.pdf",
+  "size_bytes": 125678,
+  "content_type": "application/pdf",
+  "etag": "\"opaque-etag\"",
+  "version_id": null,
+  "delete_token": "仅首次响应返回的敏感凭证"
 }
 ```
 
-单文件最大 200 MiB，默认接受所有类型。正式上传固定设置 `public-read` 对象 ACL；公网 URL 只在上传成功时返回，服务不代理下载。
+单文件最大 200 MiB，默认接受所有类型。正式上传固定设置 `public-read` 对象 ACL；公网 URL 只在上传成功时返回，服务不代理下载。数据库只保存 `delete_token` 的 SHA-256，调用方需要自行安全保存明文；首次 `201` 丢失后无法补发。当前版本尚未开放 DELETE API。
 
 ## 测试
 

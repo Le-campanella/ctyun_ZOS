@@ -3,7 +3,7 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v3
-implementation_status: object_metadata_ready
+implementation_status: delete_token_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
@@ -197,6 +197,7 @@ YYYY/MM/DD/{task_id}.{safe_extension}
 ```http
 HTTP/1.1 201 Created
 Content-Type: application/json
+Cache-Control: no-store
 X-Request-ID: 82d1f9d8-...
 ```
 
@@ -244,6 +245,7 @@ X-Request-ID: 82d1f9d8-...
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/json
+Cache-Control: no-store
 X-Request-ID: current-request-id
 Idempotency-Replayed: true
 ```
