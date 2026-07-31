@@ -20,18 +20,37 @@
     <section class="hero">
       <div>
         <p class="eyebrow">STORAGE CONTROL</p>
-        <h1>天翼云 ZOS 设置</h1>
-        <p>测试候选配置，确认连通后创建并激活新的不可变版本。</p>
+        <h1>存储预设管理</h1>
+        <p>为不同 ZOS Bucket 创建独立预设，并管理默认项、启停状态和配置版本。</p>
       </div>
-      <div class="revision-card"><span>当前 revision</span><strong id="revision">0</strong><small id="configured-state">尚未配置</small></div>
+      <div class="revision-stack">
+        <div class="revision-card"><span>配置 revision</span><strong id="revision">0</strong><small id="configured-state">尚未配置</small></div>
+        <div class="revision-card"><span>状态 revision</span><strong id="state-revision">0</strong><small id="preset-state">等待选择预设</small></div>
+      </div>
     </section>
 
     <div id="message" class="notice hidden" role="status" aria-live="polite"></div>
 
-    <form id="storage-form" class="settings-grid" autocomplete="off">
+    <div class="preset-layout">
+      <aside class="panel preset-sidebar" aria-labelledby="preset-list-title">
+        <div class="section-heading compact">
+          <div><p class="eyebrow">PRESETS</p><h2 id="preset-list-title">存储预设</h2></div>
+          <button id="new-preset-button" class="button secondary small" type="button">新建</button>
+        </div>
+        <div id="preset-list" class="preset-list" aria-live="polite"><p class="empty">正在加载…</p></div>
+      </aside>
+
+      <form id="storage-form" class="settings-grid" autocomplete="off">
       <section class="panel form-panel">
         <div class="section-heading compact"><div><p class="eyebrow">DESTINATION</p><h2>目标存储</h2></div></div>
         <div class="form-grid">
+          <label>预设 Key
+            <input id="preset-key" required minlength="1" maxlength="64" pattern="[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?" placeholder="zos-main" spellcheck="false">
+            <small>创建后不可修改；调用方通过 X-Storage-Preset 使用。</small>
+          </label>
+          <label>显示名称
+            <input id="display-name" required maxlength="100" placeholder="主资料库">
+          </label>
           <label>Provider
             <select id="provider" disabled><option value="ctyun_zos">天翼云对象存储 ZOS</option></select>
           </label>
@@ -73,6 +92,18 @@
         </div>
       </section>
 
+      <section id="preset-state-panel" class="panel action-panel hidden">
+        <div>
+          <strong>预设状态</strong>
+          <p class="muted">名称和启停使用状态 revision；配置保存使用配置 revision。</p>
+        </div>
+        <div class="actions">
+          <button id="save-name-button" class="button secondary" type="button">保存名称</button>
+          <button id="toggle-preset-button" class="button secondary" type="button">禁用预设</button>
+          <button id="default-preset-button" class="button secondary" type="button">设为默认</button>
+        </div>
+      </section>
+
       <section class="panel action-panel">
         <div>
           <strong>最近连接测试</strong>
@@ -83,7 +114,8 @@
           <button id="save-button" class="button" type="submit">保存并激活</button>
         </div>
       </section>
-    </form>
+      </form>
+    </div>
 
     <aside class="notice warning">
       此页面无登录认证。只应绑定到可信局域网地址，并在正式环境使用内网 HTTPS。

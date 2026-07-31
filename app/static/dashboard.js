@@ -2,12 +2,21 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
-  const state = { hours: 24, chart: null };
+  const state = { hours: 24, chart: null, presets: [] };
   const statusNames = {
     succeeded: "成功",
     failed: "失败",
     uploading: "上传中",
     unknown: "待确认",
+  };
+  const objectStatusNames = {
+    pending: "待确认",
+    present: "对象存在",
+    absent: "对象不存在",
+    legacy_unverified: "历史未验证",
+    deleting: "删除中",
+    deleted: "已删除",
+    delete_unknown: "删除待确认",
   };
 
   const range = () => {
@@ -55,6 +64,7 @@
     setText("health-database", checks.database.status === "ok" ? "正常" : "异常");
     setText("health-temp", checks.temp_dir.status === "ok" ? `正常 · ${formatBytes(checks.temp_dir.free_bytes)}` : "空间不足");
     setText("health-storage", checks.storage.status === "ok" ? `正常 · ${formatTime(checks.storage.last_checked_at)}` : "不可用");
+    setText("health-preset", checks.config.preset_key || "未配置");
     setText("health-provider", checks.config.provider || "未配置");
     setText("health-revision", checks.config.revision || 0);
     const badge = $("service-badge");
@@ -72,6 +82,23 @@
     setText("metric-average", formatDuration(uploads.average_duration_ms));
     setText("metric-p95", `P95 ${formatDuration(uploads.p95_duration_ms)}`);
     setText("updated-at", `更新于 ${formatTime(data.generated_at)}`);
+  }
+
+  async function loadPresets() {
+    const data = await api("/v1/settings/storage/presets");
+    state.presets = data.items.filter((preset) => preset.enabled);
+    const select = $("receive-test-preset");
+    const previous = select.value;
+    select.replaceChildren();
+    state.presets.forEach((preset) => {
+      const option = document.createElement("option");
+      option.value = preset.preset_key;
+      option.textContent = `${preset.display_name} (${preset.preset_key})${preset.is_default ? " · 默认" : ""}`;
+      option.selected = preset.preset_key === previous
+        || (!previous && preset.is_default);
+      select.append(option);
+    });
+    select.disabled = state.presets.length === 0;
   }
 
   async function loadTraffic() {
@@ -155,13 +182,17 @@
       const row = document.createElement("tr");
       cell(row, task.filename, "file");
       cell(row, statusNames[task.status] || task.status, `status status-${task.status}`);
-      cell(row, formatBytes(task.size_bytes));
-      cell(row, task.content_type);
-      cell(row, `${task.storage_provider || "—"} / ${task.storage_config_revision ?? "—"}`);
-      cell(row, formatDuration(task.duration_ms));
+      cell(row, `${task.storage_preset}\n${task.storage_provider || "—"} / r${task.storage_config_revision ?? "—"}`, "object-meta");
+      cell(row, `ETag ${task.etag || "—"}\nVersion ${task.version_id || "—"}`, "object-meta");
+      cell(
+        row,
+        `${objectStatusNames[task.object_status] || task.object_status}${task.delete_error_code ? `\n${task.delete_error_code}` : ""}`,
+        `status object-${task.object_status}`,
+      );
+      cell(row, `${formatBytes(task.size_bytes)}\n${formatDuration(task.duration_ms)}`, "object-meta");
       cell(row, formatTime(task.created_at));
       const result = cell(row, "", "task-result");
-      if (task.public_url) {
+      if (task.public_url && task.object_status === "present") {
         const link = document.createElement("a");
         link.href = task.public_url;
         link.target = "_blank";
@@ -173,7 +204,7 @@
         key.title = task.object_key;
         result.append(key);
       } else {
-        result.textContent = task.error_code || "—";
+        result.textContent = task.error_code || task.delete_error_code || objectStatusNames[task.object_status] || "—";
       }
       body.append(row);
     });
@@ -211,7 +242,7 @@
     });
   }
 
-  async function refresh(parts = [loadSummary, loadTraffic, loadTasks, loadLogs]) {
+  async function refresh(parts = [loadSummary, loadTraffic, loadTasks, loadLogs, loadPresets]) {
     clearError();
     const results = await Promise.allSettled(parts.map((load) => load()));
     const failed = results.find((result) => result.status === "rejected");
@@ -230,8 +261,9 @@
     const real = event.target.checked;
     $("receive-test-mode").textContent = real ? "真实上传已开启" : "仅接收，不上传";
     $("receive-test-mode").className = `badge ${real ? "warning" : "ok"}`;
+    $("receive-test-preset-field").classList.toggle("hidden", !real);
     $("receive-test-help").textContent = real
-      ? "文件将通过正式上传接口写入当前 ZOS，并创建任务记录、返回公网链接。"
+      ? "文件将通过正式上传接口写入所选预设，并创建任务记录、返回公网链接。"
       : "使用与正式上传相同的接收、大小限制和临时文件流程，不连接对象存储，也不创建任务记录。";
     $("receive-test-button").textContent = real ? "上传到 ZOS" : "提交接收测试";
   });
@@ -245,6 +277,13 @@
     button.disabled = true;
     toggle.disabled = true;
     const real = toggle.checked;
+    const preset = $("receive-test-preset").value;
+    if (real && !preset) {
+      result.value = JSON.stringify({ error: { message: "没有可用的启用预设" } }, null, 2);
+      button.disabled = false;
+      toggle.disabled = false;
+      return;
+    }
     result.value = real ? "正在上传到 ZOS…" : "正在接收并校验文件…";
     try {
       const form = new FormData();
@@ -252,7 +291,10 @@
       const response = await fetch(real ? "/v1/uploads" : "/v1/uploads/validate", {
         method: "POST",
         body: form,
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          ...(real ? { "X-Storage-Preset": preset } : {}),
+        },
       });
       const body = await response.json();
       if (body.delete_token) body.delete_token = "[REDACTED]";

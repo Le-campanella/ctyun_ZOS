@@ -260,11 +260,23 @@ def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     assert "innerHTML" not in dashboard_js.text
     assert "innerHTML" not in settings_js.text
     assert "localStorage" not in settings_js.text
+    assert "sessionStorage" not in settings_js.text
     assert 'id="receive-test-file"' in dashboard.text
     assert 'id="receive-test-real-upload" type="checkbox" role="switch"' in dashboard.text
+    assert 'id="receive-test-preset"' in dashboard.text
+    assert 'id="preset-list"' in settings.text
+    assert 'id="preset-key"' in settings.text
+    assert 'id="state-revision"' in settings.text
     assert "/v1/uploads/validate" in dashboard_js.text
     assert 'real ? "/v1/uploads" : "/v1/uploads/validate"' in dashboard_js.text
+    assert '"X-Storage-Preset": preset' in dashboard_js.text
     assert 'body.delete_token = "[REDACTED]"' in dashboard_js.text
+    assert "/v1/settings/storage/presets" in settings_js.text
+    assert "/v1/settings/storage/default" in settings_js.text
+    assert "expected_state_revision" in settings_js.text
+    assert "storage_preset" in dashboard_js.text
+    assert "delete_error_code" in dashboard_js.text
+    assert "X-Delete-Token" not in dashboard_js.text
 
 
 def test_receive_validation_works_unconfigured_without_task_or_storage(client):
@@ -741,7 +753,9 @@ def test_upload_success_task_list_detail_stats_and_logs(client):
     assert tasks[0]["request_id"] == "request-1"
     detail = client.get(f"/v1/upload-tasks/{result['task_id']}").json()
     assert detail["idempotency_key"] == "job-1"
-    summary = client.get("/v1/dashboard/summary").json()["uploads"]
+    summary_body = client.get("/v1/dashboard/summary").json()
+    assert summary_body["service"]["checks"]["config"]["preset_key"] == "default"
+    summary = summary_body["uploads"]
     assert summary["success_count"] == 1
     assert summary["successful_upload_bytes"] == 5
     traffic = client.get("/v1/dashboard/traffic?interval=hour").json()

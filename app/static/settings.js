@@ -2,8 +2,7 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
-  let revision = 0;
-  let configured = false;
+  const state = { items: [], selected: null, detail: null, creating: false };
 
   function show(message, kind = "ok") {
     const box = $("message");
@@ -21,48 +20,142 @@
       ...options,
       headers: {
         Accept: "application/json",
-        ...(options.body ? { "Content-Type": "application/json", "X-Settings-Request": "true" } : {}),
+        ...(options.body ? {
+          "Content-Type": "application/json",
+          "X-Settings-Request": "true",
+        } : {}),
       },
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error?.message || `${response.status} ${response.statusText}`);
+    if (!response.ok) {
+      throw new Error(body.error?.message || `${response.status} ${response.statusText}`);
+    }
     return body;
   }
 
-  function renderCurrent(data) {
-    revision = data.revision;
-    configured = data.configured;
-    $("revision").textContent = String(revision);
-    $("configured-state").textContent = configured ? `已于 ${new Date(data.activated_at).toLocaleString()} 激活` : "尚未配置";
+  function renderList() {
+    const list = $("preset-list");
+    list.replaceChildren();
+    if (!state.items.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "尚未创建预设";
+      list.append(empty);
+      return;
+    }
+    state.items.forEach((preset) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `preset-item ${preset.preset_key === state.selected ? "active" : ""}`;
+      button.addEventListener("click", () => selectPreset(preset.preset_key));
+      const title = document.createElement("strong");
+      title.textContent = preset.display_name;
+      const key = document.createElement("code");
+      key.textContent = preset.preset_key;
+      const meta = document.createElement("span");
+      meta.textContent = [
+        preset.is_default ? "默认" : null,
+        preset.enabled ? "启用" : "禁用",
+        `配置 r${preset.config_revision ?? 0}`,
+        `状态 r${preset.state_revision}`,
+      ].filter(Boolean).join(" · ");
+      button.append(title, key, meta);
+      list.append(button);
+    });
+  }
+
+  function resetForm() {
+    $("storage-form").reset();
+    $("preset-key").disabled = false;
+    $("revision").textContent = "0";
+    $("state-revision").textContent = "0";
+    $("configured-state").textContent = "新预设";
+    $("preset-state").textContent = "尚未保存";
+    $("credential-state").textContent = "未配置";
+    $("credential-state").className = "badge neutral";
+    $("access-key-masked").textContent = "";
+    $("last-test").textContent = "尚无测试记录";
+    $("save-button").textContent = "创建预设";
+    $("preset-state-panel").classList.add("hidden");
+    clearSecrets();
+  }
+
+  function syncStateButtons() {
+    if (!state.detail || state.creating) return;
+    $("toggle-preset-button").disabled = state.detail.is_default && state.detail.enabled;
+    $("default-preset-button").disabled = state.detail.is_default || !state.detail.enabled;
+  }
+
+  function newPreset() {
+    state.creating = true;
+    state.selected = null;
+    state.detail = null;
+    renderList();
+    resetForm();
+    $("preset-key").focus();
+    show("填写候选配置并先测试连接；创建时必须提供完整 AK/SK。", "warning");
+  }
+
+  function renderDetail(data) {
+    state.creating = false;
+    state.detail = data;
+    $("preset-key").value = data.preset_key;
+    $("preset-key").disabled = true;
+    $("display-name").value = data.display_name;
+    $("revision").textContent = String(data.revision);
+    $("state-revision").textContent = String(data.state_revision);
+    $("configured-state").textContent = `已于 ${new Date(data.activated_at).toLocaleString()} 激活`;
+    $("preset-state").textContent = [
+      data.is_default ? "默认预设" : null,
+      data.enabled ? "已启用" : "已禁用",
+    ].filter(Boolean).join(" · ");
     const credentials = data.credentials;
     $("credential-state").textContent = credentials.secret_key_configured ? "已配置" : "未配置";
     $("credential-state").className = `badge ${credentials.secret_key_configured ? "ok" : "neutral"}`;
     $("access-key-masked").textContent = credentials.access_key_masked || "";
-    if (data.last_connection_test) {
-      $("last-test").textContent = `${data.last_connection_test.status.toUpperCase()} · ${new Date(data.last_connection_test.tested_at).toLocaleString()} · ${data.last_connection_test.latency_ms} ms`;
-    } else {
-      $("last-test").textContent = "尚无测试记录";
-    }
-    if (!data.config) return;
-    $("endpoint-url").value = data.config.endpoint_url;
-    $("bucket").value = data.config.bucket;
-    $("public-base-url").value = data.config.public_base_url;
-    $("connect-timeout").value = data.config.connect_timeout_seconds;
-    $("read-timeout").value = data.config.read_timeout_seconds;
-    $("max-attempts").value = data.config.max_attempts;
-    $("verify-tls").checked = data.config.verify_tls;
-    $("enable-metrics").checked = data.config.enable_bucket_metrics;
+    $("last-test").textContent = data.last_connection_test
+      ? `${data.last_connection_test.status.toUpperCase()} · ${new Date(data.last_connection_test.tested_at).toLocaleString()} · ${data.last_connection_test.latency_ms} ms`
+      : "尚无测试记录";
+    const config = data.config;
+    $("endpoint-url").value = config.endpoint_url;
+    $("bucket").value = config.bucket;
+    $("public-base-url").value = config.public_base_url;
+    $("connect-timeout").value = config.connect_timeout_seconds;
+    $("read-timeout").value = config.read_timeout_seconds;
+    $("max-attempts").value = config.max_attempts;
+    $("verify-tls").checked = config.verify_tls;
+    $("enable-metrics").checked = config.enable_bucket_metrics;
+    $("save-button").textContent = "保存新配置 revision";
+    $("preset-state-panel").classList.remove("hidden");
+    $("toggle-preset-button").textContent = data.enabled ? "禁用预设" : "启用预设";
+    syncStateButtons();
+    clearSecrets();
   }
 
-  async function load() {
+  async function selectPreset(presetKey) {
+    state.selected = presetKey;
+    renderList();
     try {
-      renderCurrent(await api("/v1/settings/storage"));
+      const detail = await api(`/v1/settings/storage/presets/${encodeURIComponent(presetKey)}`);
+      if (state.selected !== presetKey) return;
+      renderDetail(detail);
     } catch (error) {
       show(error.message, "error");
     }
   }
 
-  function payload(includeRevision) {
+  async function loadPresets(preferred) {
+    const data = await api("/v1/settings/storage/presets");
+    state.items = data.items;
+    const target = preferred
+      || (state.selected && state.items.some((item) => item.preset_key === state.selected) ? state.selected : null)
+      || state.items.find((item) => item.is_default)?.preset_key
+      || state.items[0]?.preset_key;
+    if (target) await selectPreset(target);
+    else newPreset();
+  }
+
+  function storagePayload() {
     const credentials = {};
     if ($("access-key").value) credentials.access_key = $("access-key").value;
     if ($("secret-key").value) credentials.secret_key = $("secret-key").value;
@@ -81,55 +174,129 @@
       },
     };
     if (Object.keys(credentials).length) body.credentials = credentials;
-    if (includeRevision) body.expected_revision = revision;
     return body;
   }
 
-  async function submit(path, method, button, success) {
-    if (!$("storage-form").reportValidity()) return;
+  async function run(button, action, clear = false) {
     button.disabled = true;
     try {
-      const result = await api(path, { method, body: JSON.stringify(payload(method === "PUT")) });
-      show(success(result), "ok");
-      if (method === "PUT") renderCurrent(result);
+      await action();
     } catch (error) {
       show(error.message, "error");
     } finally {
-      clearSecrets();
+      if (clear) clearSecrets();
       button.disabled = false;
+      syncStateButtons();
     }
   }
 
-  $("test-button").addEventListener("click", () => submit(
-    "/v1/settings/storage/test",
-    "POST",
-    $("test-button"),
-    (result) => `连接测试成功，耗时 ${result.latency_ms} ms；此操作未保存配置。`,
-  ));
+  $("test-button").addEventListener("click", () => {
+    if (!$("storage-form").reportValidity()) return;
+    run($("test-button"), async () => {
+      const body = storagePayload();
+      if (!state.creating) body.preset_key = state.selected;
+      const result = await api("/v1/settings/storage/test", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      show(`连接测试成功，耗时 ${result.latency_ms} ms；此操作未保存配置。`);
+    }, true);
+  });
 
   $("storage-form").addEventListener("submit", (event) => {
     event.preventDefault();
+    if (!$("storage-form").reportValidity()) return;
+    const key = $("preset-key").value.trim();
+    if (state.creating && (!$("access-key").value || !$("secret-key").value)) {
+      show("创建预设必须提供完整 Access Key 和 Secret Key。", "error");
+      return;
+    }
     const target = `${$("endpoint-url").value.trim()} / ${$("bucket").value.trim()}`;
-    if (!confirm(`确认保存并激活 ${target} 的 revision ${revision + 1}？`)) return;
-    submit(
-      "/v1/settings/storage",
-      "PUT",
-      $("save-button"),
-      (result) => `revision ${result.revision} 已保存并激活。`,
-    );
+    if (!confirm(`确认保存 ${key} 的 ${target}？`)) return;
+    run($("save-button"), async () => {
+      const body = storagePayload();
+      let result;
+      if (state.creating) {
+        body.preset_key = key;
+        body.display_name = $("display-name").value.trim();
+        result = await api("/v1/settings/storage/presets", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      } else {
+        body.expected_revision = state.detail.revision;
+        result = await api(`/v1/settings/storage/presets/${encodeURIComponent(key)}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+      }
+      show(`${result.display_name} 的配置 revision ${result.revision} 已激活。`);
+      await loadPresets(result.preset_key);
+    }, true);
   });
+
+  $("save-name-button").addEventListener("click", () => {
+    if (!$("display-name").reportValidity()) return;
+    run($("save-name-button"), async () => {
+      const result = await api(`/v1/settings/storage/presets/${encodeURIComponent(state.selected)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          expected_state_revision: state.detail.state_revision,
+          display_name: $("display-name").value.trim(),
+        }),
+      });
+      show(`显示名称已更新，状态 revision ${result.state_revision}。`);
+      await loadPresets(state.selected);
+    });
+  });
+
+  $("toggle-preset-button").addEventListener("click", () => run(
+    $("toggle-preset-button"),
+    async () => {
+      const enabled = !state.detail.enabled;
+      if (!confirm(`确认${enabled ? "启用" : "禁用"}预设 ${state.selected}？`)) return;
+      const result = await api(`/v1/settings/storage/presets/${encodeURIComponent(state.selected)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          expected_state_revision: state.detail.state_revision,
+          enabled,
+        }),
+      });
+      show(`预设已${result.enabled ? "启用" : "禁用"}。`);
+      await loadPresets(state.selected);
+    },
+  ));
+
+  $("default-preset-button").addEventListener("click", () => run(
+    $("default-preset-button"),
+    async () => {
+      const current = state.items.find((item) => item.is_default);
+      if (!current || !confirm(`确认把 ${state.selected} 设为默认预设？`)) return;
+      const result = await api("/v1/settings/storage/default", {
+        method: "PUT",
+        body: JSON.stringify({
+          preset_key: state.selected,
+          expected_default_preset: current.preset_key,
+          expected_state_revision: state.detail.state_revision,
+        }),
+      });
+      show(`${result.display_name} 已成为默认预设。`);
+      await loadPresets(state.selected);
+    },
+  ));
 
   function suggestPublicUrl() {
     if ($("public-base-url").value || !$("bucket").value || !$("endpoint-url").value) return;
     try {
       const endpoint = new URL($("endpoint-url").value);
-      const suggestion = `${endpoint.protocol}//${$("bucket").value}.${endpoint.host}`;
-      $("url-suggestion").textContent = `建议值：${suggestion}`;
+      $("url-suggestion").textContent = `建议值：${endpoint.protocol}//${$("bucket").value}.${endpoint.host}`;
     } catch (_) {
       $("url-suggestion").textContent = "上传成功后用它拼接对象 Key。";
     }
   }
+
+  $("new-preset-button").addEventListener("click", newPreset);
   $("endpoint-url").addEventListener("input", suggestPublicUrl);
   $("bucket").addEventListener("input", suggestPublicUrl);
-  load();
+  loadPresets().catch((error) => show(error.message, "error"));
 })();

@@ -3,14 +3,14 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v3
-implementation_status: delete_recovery_audit_ready
+implementation_status: dashboard_v3_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
 
 > 面向对象：局域网内调用本服务的其他服务、接入 Agent，以及包含监控与存储设置功能的 Dashboard。
 >
-> 接口文档修订：`v3`（多存储预设、上传路由、严格删除、删除恢复与审计已实现，Dashboard v3 待实现）；HTTP 路径命名空间继续使用 `/v1`。
+> 接口文档修订：`v3`（多存储预设、上传路由、严格删除、删除恢复与审计、Dashboard v3 已实现）；HTTP 路径命名空间继续使用 `/v1`。
 >
 > 同步基线：`PLAN.md` v6
 >
@@ -26,7 +26,7 @@ implementation_status: delete_recovery_audit_ready
 4. 使用可选 `Idempotency-Key` 避免调用方超时后产生重复对象。
 5. 返回进程健康状态和服务就绪状态。
 6. 提供上传统计、流量时间序列、`NOTIFY` 及以上日志和可选 Storage Provider 原生指标；第一版为 ZOS Bucket 指标。
-7. 提供同源、无登录的 Web Dashboard，其中监控区域只读，设置页面可以测试和激活存储配置。
+7. 提供同源、无登录的 Web Dashboard，其中监控区域只读展示预设、对象与删除状态，设置页面可以管理多个存储预设。
 8. 提供 Provider 类型、多个存储预设、默认项、连接测试和配置 revision API。
 9. 提供不会上传对象存储、不会创建任务记录的局域网文件接收测试。
 10. 使用上传成功时返回的对象级删除凭证，严格删除该任务创建的对象并保留审计记录。

@@ -7,8 +7,9 @@
 - 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
 - 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
 - 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API。上传接口可通过 `X-Storage-Preset` 选择已启用预设，未传时使用默认项。
+- Dashboard 设置页已支持多预设创建、测试、更新、启停和默认切换；监控页可选择预设执行真实上传测试，并只读展示对象与删除状态。
 - `DELETE /v1/upload-tasks/{task_id}/object` 已开放严格删除：只接受任务级 `X-Delete-Token`，使用任务原配置校验对象元数据、精确删除 VersionId 并再次确认对象不存在。
-- [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
+- [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 仍是未发布目标契约；仓库实现已推进到 Dashboard v3，正式生产行为以部署版本为准。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 
 实施记录见 [WORKLOG.md](WORKLOG.md)，外部审查与实施建议见 [docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md](docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md)。
@@ -61,7 +62,7 @@ curl -fsS -F 'file=@./example.pdf' \
   http://<内网IP>:8000/v1/uploads/validate
 ```
 
-同一功能也可以在 Dashboard 的“局域网文件接收测试”区域操作。“真实上传到 ZOS”开关默认关闭，此时只执行 multipart、大小限制和临时文件读写；开启后会调用正式上传接口、创建任务并返回公网链接。
+同一功能也可以在 Dashboard 的“局域网文件接收测试”区域操作。“真实上传到 ZOS”开关默认关闭，此时只执行 multipart、大小限制和临时文件读写；开启后可以选择任一已启用预设，调用正式上传接口、创建任务并返回公网链接。
 
 真实上传：
 
@@ -115,7 +116,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果、重启/陈旧任务恢复、永久审计和数据库失败，以及多预设路由和在途快照、上传、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、Dashboard 与设置接口。
+测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果、重启/陈旧任务恢复、永久审计和数据库失败，以及多预设路由和在途快照、上传、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、Dashboard 多预设管理与设置接口。
 
 ## 部署到局域网服务器
 

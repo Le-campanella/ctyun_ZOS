@@ -770,6 +770,7 @@ class Runtime:
             "config": {
                 "status": "ok" if snapshot else "error",
                 "configured": snapshot is not None,
+                "preset_key": snapshot.preset_key if snapshot else None,
                 "provider": snapshot.provider_id if snapshot else None,
                 "provider_schema_version": snapshot.provider_schema_version
                 if snapshot

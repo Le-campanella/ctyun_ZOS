@@ -48,6 +48,10 @@
             <span>真实上传到 ZOS</span>
             <small>默认关闭；开启后会创建正式任务并返回公网链接。</small>
           </label>
+          <label id="receive-test-preset-field" class="file-picker hidden">存储预设
+            <select id="receive-test-preset" aria-label="真实上传使用的存储预设"></select>
+            <small>只显示已启用预设；默认选中当前默认项。</small>
+          </label>
           <button id="receive-test-button" class="button" type="submit">提交接收测试</button>
         </form>
         <label class="result-box">返回信息
@@ -66,6 +70,7 @@
         <article class="health-item"><span>SQLite</span><strong id="health-database">—</strong></article>
         <article class="health-item"><span>临时目录</span><strong id="health-temp">—</strong></article>
         <article class="health-item"><span>存储连接</span><strong id="health-storage">—</strong></article>
+        <article class="health-item"><span>默认预设</span><strong id="health-preset">—</strong></article>
         <article class="health-item"><span>Provider</span><strong id="health-provider">—</strong></article>
         <article class="health-item"><span>配置版本</span><strong id="health-revision">—</strong></article>
       </div>
@@ -104,7 +109,7 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>文件</th><th>状态</th><th>大小</th><th>类型</th><th>Provider / Rev</th><th>耗时</th><th>创建时间</th><th>结果</th></tr></thead>
+          <thead><tr><th>文件</th><th>上传状态</th><th>存储预设</th><th>对象身份</th><th>删除状态</th><th>大小 / 耗时</th><th>创建时间</th><th>结果</th></tr></thead>
           <tbody id="task-rows"><tr><td colspan="8" class="empty">正在加载…</td></tr></tbody>
         </table>
       </div>
