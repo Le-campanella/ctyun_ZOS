@@ -92,6 +92,7 @@
 - 2026-07-31：新增 `s3_compatible` Provider，复用已验证的 S3 上传、HeadObject、严格删除和公网 URL 流程；保留 `ctyun_zos` 的扩展 Bucket 指标能力。
 - 2026-07-31：通用 Provider 明确要求 S3 API、HeadObject、DeleteObject 和 `public-read` ACL，不假定兼容厂商私有协议；前端会按 Provider 能力启停扩展指标。
 - 2026-07-31：多服务预设 UI、Provider schema 和生产镜像验证通过，自动测试增加到 65 项。
+- 2026-07-31：提交并部署 `01dc272`；远程 Provider API 与设置页已显示天翼云和通用 S3 两种服务类型，原默认预设、私有备份配置和每日备份任务保持不变。
 
 ## 尚未完成
 
