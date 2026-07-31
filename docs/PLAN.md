@@ -1,10 +1,10 @@
 # 局域网轻量文件上传服务实施计划（ZOS v3）
 
-> 状态：v6 方案已确认，多存储预设与严格删除已实现，删除恢复和 Dashboard v3 待实现。
+> 状态：v6 方案已确认，多存储预设、严格删除、删除恢复与审计已实现，Dashboard v3 待实现。
 >
 > 完整调用方与 Dashboard 接口契约见 [API.md](API.md)。本文与 `API.md` 已完成同步。
 >
-> 实现进度（2026-07-31）：契约冻结、SQLite schema v1→v2→v3 迁移、上传对象元数据确认、一次性删除凭证、多预设与上传路由，以及严格 DELETE 工作流已完成；删除恢复、完整审计和 Dashboard v3 尚未发布。
+> 实现进度（2026-07-31）：契约冻结、SQLite schema v1→v2→v3 迁移、上传对象元数据确认、一次性删除凭证、多预设与上传路由、严格 DELETE、删除恢复与永久审计已完成；Dashboard v3 尚未发布。
 
 ## 1. 目标
 
@@ -1101,8 +1101,8 @@ enable_bucket_metrics
 
 进程内维护协程在启动时和每 24 小时执行一次：
 
-- 删除超过 `LOG_RETENTION_DAYS` 的日志。
-- 超过 `LOG_MAX_ROWS` 时按最旧记录继续裁剪。
+- 删除超过 `LOG_RETENTION_DAYS` 的普通日志；`object_delete_*` 删除审计永久保留。
+- 普通日志超过 `LOG_MAX_ROWS` 时按最旧记录继续裁剪；删除审计不计入该上限。
 - 只删除超过 `TASK_RETENTION_DAYS` 且对象状态为 `absent` 或 `deleted` 的终态任务。
 - 无论年龄多久，保留所有 `uploading`、`unknown`、`pending`、`present`、`legacy_unverified`、`deleting` 和 `delete_unknown` 任务，避免产生无法通过服务定位的孤儿对象。
 - 保留被任何任务引用的 storage config revision。
@@ -1268,7 +1268,7 @@ enable_bucket_metrics
 19. Dashboard 上传流量以 SQLite 任务台账为主数据源。
 20. ZOS Bucket Statistics 和 Storage Info 为可选补充指标。
 21. `NOTIFY=25`，Dashboard 持久化并显示 `NOTIFY` 及以上日志。
-22. 日志默认保留 30 天或最多 100000 条，任务默认保留 180 天。
+22. 普通日志默认保留 30 天或最多 100000 条，`object_delete_*` 删除审计永久保留，任务默认保留 180 天。
 23. 服务不提供对象下载、更新、列表或 Bucket 权限管理能力。
 24. 删除只面向本服务新上传且元数据完整的对象；目标由任务数据库定位，调用方不能传入任意 Bucket、Key 或 VersionId。
 25. 删除必须同时提供任务 ID 和对象级 `delete_token`；明文 token 只返回一次，数据库只存哈希，token 不进入查询接口、Dashboard、日志或 URL。

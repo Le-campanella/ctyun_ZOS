@@ -21,6 +21,7 @@ from .providers import (
     ProviderError,
     ProviderRegistry,
     StorageProvider,
+    matches_object_metadata,
     require_upload_metadata,
 )
 from .security import CredentialCipher
@@ -605,10 +606,10 @@ class Runtime:
 
     async def recover(self) -> None:
         self.recovery_complete = False
-        stale = (
+        stale_upload = (
             datetime.now(UTC) - timedelta(seconds=self.settings.stale_upload_seconds)
         ).isoformat().replace("+00:00", "Z")
-        tasks = self.database.pending_tasks(stale)
+        tasks = self.database.pending_tasks(stale_upload)
         for task in tasks:
             try:
                 provider = self.provider_for_config(task["storage_config_id"])
@@ -652,7 +653,82 @@ class Runtime:
                     object_status="pending",
                     error_code="RECOVERY_PENDING",
                 )
+        stale_delete = (
+            datetime.now(UTC) - timedelta(seconds=self.settings.stale_delete_seconds)
+        ).isoformat().replace("+00:00", "Z")
+        for task in self.database.pending_deletions(stale_delete):
+            await self._recover_deletion(task)
         self.recovery_complete = True
+
+    async def _recover_deletion(self, task: dict[str, Any]) -> None:
+        from_status = task["object_status"]
+        try:
+            provider = self.provider_for_config(task["storage_config_id"])
+            metadata = await anyio.to_thread.run_sync(
+                provider.head_object, task["object_key"], task["version_id"]
+            )
+        except ProviderError as exc:
+            to_status = "delete_unknown"
+            error_code = (
+                "STORAGE_CONFIG_UNAVAILABLE"
+                if exc.code == "RECOVERY_PENDING"
+                else "DELETE_PENDING"
+            )
+            provider_result = exc.code
+        except Exception as exc:
+            to_status = "delete_unknown"
+            error_code = "STORAGE_CONFIG_UNAVAILABLE"
+            provider_result = type(exc).__name__
+        else:
+            if metadata is None:
+                to_status = "deleted"
+                error_code = None
+                provider_result = "confirmed_absent"
+            elif matches_object_metadata(
+                metadata,
+                task["size_bytes"],
+                task["etag"],
+                task["version_id"],
+            ):
+                to_status = "present"
+                error_code = "DELETE_FAILED"
+                provider_result = "original_present"
+            else:
+                to_status = "present"
+                error_code = "OBJECT_CHANGED"
+                provider_result = "metadata_mismatch"
+        if (
+            task["object_status"] == to_status
+            and task["delete_error_code"] == error_code
+        ):
+            return
+        changes: dict[str, Any] = {
+            "object_status": to_status,
+            "delete_error_code": error_code,
+        }
+        if to_status == "deleted":
+            changes["deleted_at"] = utc_now()
+        self.database.update_task(task["id"], **changes)
+        self.log.emit(
+            NOTIFY,
+            "object_delete_recovered"
+            if to_status in {"deleted", "present"}
+            else "object_delete_recovery_pending",
+            "对象删除恢复状态已更新",
+            request_id=task["delete_request_id"],
+            task_id=task["id"],
+            error_code=error_code,
+            details={
+                "from_status": from_status,
+                "to_status": to_status,
+                "provider_result": provider_result,
+                "object_key": task["object_key"],
+                "size_bytes": task["size_bytes"],
+                "etag": task["etag"],
+                "version_id": task["version_id"],
+                "storage_config_id": task["storage_config_id"],
+            },
+        )
 
     def ready_checks(self) -> tuple[bool, dict[str, Any], str]:
         snapshot = self.active_snapshot()
@@ -710,7 +786,8 @@ class Runtime:
             "recovery": {
                 "status": "ok" if self.recovery_complete else "pending",
                 "completed": self.recovery_complete,
-                "pending_tasks": len(self.database.pending_tasks()),
+                "pending_tasks": len(self.database.pending_tasks())
+                + len(self.database.pending_deletions(utc_now())),
             },
             "storage": storage,
         }

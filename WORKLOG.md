@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v3，上传对象元数据确认、一次性删除凭证、多预设 Runtime、管理 API、显式上传路由和严格 DELETE API 已经实现。删除恢复、完整审计和 Dashboard v3 仍是未发布目标。
+第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v3，上传对象元数据确认、一次性删除凭证、多预设 Runtime、管理 API、显式上传路由、严格 DELETE、删除恢复和永久审计已经实现。Dashboard v3 仍是未发布目标。
 
 ## 已完成
 
@@ -66,14 +66,17 @@
 - 2026-07-31：删除通过 SQLite 条件更新抢占 `present → deleting`，使用任务原 `storage_config_id`，删除前后执行 HeadObject，并校验大小、ETag 和可选 VersionId。
 - 2026-07-31：支持精确版本删除、已删除幂等响应、删除前已不存在、Provider 明确失败和 `202 DELETE_PENDING`；任务查询增加删除状态字段。
 - 2026-07-31：完成 token、请求体、历史任务、元数据变化、旧配置 revision、并发删除、Provider 超时和数据库落盘失败测试；共 55 个自动测试通过。
+- 2026-07-31：启动和周期恢复增加 `delete_unknown` 与陈旧 `deleting`；使用任务原 Provider revision 执行精确 HeadObject，不会再次主动调用删除。
+- 2026-07-31：恢复确认不存在时转为 `deleted`，原对象仍一致时转回 `present + DELETE_FAILED`，元数据变化时转为 `present + OBJECT_CHANGED`，仍无法确认时保持 `delete_unknown`。
+- 2026-07-31：删除开始、结果和恢复迁移写入不含 token 的 `object_delete_*` 持久审计；维护任务永久跳过这些事件。
+- 2026-07-31：增加 `STALE_DELETE_SECONDS`（默认 900 秒），完成重启恢复、陈旧删除、保守恢复、审计内容和审计保留测试；共 60 个自动测试通过。
 
 ## 尚未完成
 
 - 多预设 Dashboard。
-- 删除不确定结果的启动/周期恢复与完整审计事件。
 - 完成接近 200 MiB、multipart、重启恢复等剩余真实 ZOS 压力与故障验收；基础 PDF 上传和公网访问已经通过。
 - 在目标局域网部署内网 HTTPS 反向代理、网络访问控制、数据库备份和 Bucket 生命周期规则；这些属于部署环境工作。
 
 ## 下一步
 
-进入下一提交：恢复 `delete_unknown` 和陈旧 `deleting` 任务，并补齐删除审计事件。
+进入下一提交：实现多预设 Dashboard 管理与状态展示。

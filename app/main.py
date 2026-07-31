@@ -56,10 +56,10 @@ from .models import (
     UploadResponse,
 )
 from .providers import (
-    ObjectMetadata,
     ProviderError,
     ProviderRegistry,
     default_registry,
+    matches_object_metadata,
     require_upload_metadata,
 )
 from .runtime import Runtime
@@ -456,35 +456,69 @@ def _deletion_gate(task: dict[str, Any]) -> JSONResponse | None:
 def _save_deletion(
     runtime: Runtime,
     request_id: str,
-    task_id: str,
+    task: dict[str, Any],
+    provider_result: str,
     **changes: Any,
 ) -> None:
     try:
-        runtime.database.update_task(task_id, **changes)
+        runtime.database.update_task(task["id"], **changes)
     except sqlite3.Error as exc:
         runtime.log.emit(
             50,
             "database_error",
             "对象删除结果写入失败",
             request_id=request_id,
-            task_id=task_id,
+            task_id=task["id"],
             error_code="DATABASE_ERROR",
         )
         raise APIError(
             500,
             "DATABASE_ERROR",
             "对象删除状态无法安全写入",
-            task_id=task_id,
+            task_id=task["id"],
         ) from exc
+    to_status = changes["object_status"]
+    error_code = changes.get("delete_error_code")
+    event = (
+        "object_delete_succeeded"
+        if to_status == "deleted"
+        else "object_delete_pending"
+        if to_status == "delete_unknown"
+        else "object_delete_changed"
+        if error_code == "OBJECT_CHANGED"
+        else "object_delete_failed"
+    )
+    runtime.log.emit(
+        NOTIFY,
+        event,
+        "对象删除状态已更新",
+        request_id=request_id,
+        task_id=task["id"],
+        error_code=error_code,
+        details={
+            "from_status": "deleting",
+            "to_status": to_status,
+            "provider_result": provider_result,
+            "object_key": task["object_key"],
+            "size_bytes": task["size_bytes"],
+            "etag": task["etag"],
+            "version_id": task["version_id"],
+            "storage_config_id": task["storage_config_id"],
+        },
+    )
 
 
 def _delete_pending(
-    runtime: Runtime, request: Request, task: dict[str, Any]
+    runtime: Runtime,
+    request: Request,
+    task: dict[str, Any],
+    provider_result: str = "uncertain",
 ) -> JSONResponse:
     _save_deletion(
         runtime,
         _request_id(request),
-        task["id"],
+        task,
+        provider_result,
         object_status="delete_unknown",
         delete_error_code="DELETE_PENDING",
     )
@@ -501,19 +535,6 @@ def _delete_pending(
             "error": body["error"],
         },
         status_code=202,
-    )
-
-
-def _same_object(task: dict[str, Any], metadata: ObjectMetadata) -> bool:
-    return (
-        task["size_bytes"] is not None
-        and task["etag"] is not None
-        and metadata.size_bytes == task["size_bytes"]
-        and metadata.etag == task["etag"]
-        and (
-            task["version_id"] is None
-            or metadata.version_id == task["version_id"]
-        )
     )
 
 
@@ -1208,13 +1229,31 @@ def create_app(
                 "对象删除状态已改变",
                 task_id=task_id,
             )
+        runtime.log.emit(
+            NOTIFY,
+            "object_delete_started",
+            "对象删除已开始",
+            request_id=_request_id(request),
+            task_id=task_id,
+            details={
+                "from_status": "present",
+                "to_status": "deleting",
+                "provider_result": None,
+                "object_key": task["object_key"],
+                "size_bytes": task["size_bytes"],
+                "etag": task["etag"],
+                "version_id": task["version_id"],
+                "storage_config_id": task["storage_config_id"],
+            },
+        )
         try:
             provider = runtime.provider_for_config(task["storage_config_id"])
         except Exception as exc:
             _save_deletion(
                 runtime,
                 _request_id(request),
-                task_id,
+                task,
+                "config_unavailable",
                 object_status="present",
                 delete_error_code="STORAGE_CONFIG_UNAVAILABLE",
             )
@@ -1230,11 +1269,12 @@ def create_app(
             )
         except ProviderError as exc:
             if exc.uncertain:
-                return _delete_pending(runtime, request, task)
+                return _delete_pending(runtime, request, task, exc.code)
             _save_deletion(
                 runtime,
                 _request_id(request),
-                task_id,
+                task,
+                exc.code,
                 object_status="present",
                 delete_error_code="DELETE_FAILED",
             )
@@ -1249,7 +1289,8 @@ def create_app(
             _save_deletion(
                 runtime,
                 _request_id(request),
-                task_id,
+                task,
+                "already_absent",
                 object_status="deleted",
                 delete_error_code=None,
                 deleted_at=deleted_at,
@@ -1259,11 +1300,17 @@ def create_app(
                 already_deleted=False,
                 already_absent=True,
             )
-        if not _same_object(task, metadata):
+        if not matches_object_metadata(
+            metadata,
+            task["size_bytes"],
+            task["etag"],
+            task["version_id"],
+        ):
             _save_deletion(
                 runtime,
                 _request_id(request),
-                task_id,
+                task,
+                "metadata_mismatch",
                 object_status="present",
                 delete_error_code="OBJECT_CHANGED",
             )
@@ -1279,11 +1326,12 @@ def create_app(
             )
         except ProviderError as exc:
             if exc.uncertain:
-                return _delete_pending(runtime, request, task)
+                return _delete_pending(runtime, request, task, exc.code)
             _save_deletion(
                 runtime,
                 _request_id(request),
-                task_id,
+                task,
+                exc.code,
                 object_status="present",
                 delete_error_code="DELETE_FAILED",
             )
@@ -1298,14 +1346,22 @@ def create_app(
                 provider.head_object, task["object_key"], task["version_id"]
             )
         except ProviderError:
-            return _delete_pending(runtime, request, task)
+            return _delete_pending(runtime, request, task, "post_delete_head_error")
         if remaining is not None:
-            if not _same_object(task, remaining):
-                return _delete_pending(runtime, request, task)
+            if not matches_object_metadata(
+                remaining,
+                task["size_bytes"],
+                task["etag"],
+                task["version_id"],
+            ):
+                return _delete_pending(
+                    runtime, request, task, "post_delete_object_changed"
+                )
             _save_deletion(
                 runtime,
                 _request_id(request),
-                task_id,
+                task,
+                "still_present",
                 object_status="present",
                 delete_error_code="DELETE_FAILED",
             )
@@ -1319,7 +1375,8 @@ def create_app(
         _save_deletion(
             runtime,
             _request_id(request),
-            task_id,
+            task,
+            "confirmed_absent",
             object_status="deleted",
             delete_error_code=None,
             deleted_at=deleted_at,

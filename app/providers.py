@@ -63,6 +63,24 @@ def require_upload_metadata(metadata: ObjectMetadata, expected_size: int) -> Non
         )
 
 
+def matches_object_metadata(
+    metadata: ObjectMetadata,
+    expected_size: int | None,
+    expected_etag: str | None,
+    expected_version_id: str | None,
+) -> bool:
+    return (
+        expected_size is not None
+        and expected_etag is not None
+        and metadata.size_bytes == expected_size
+        and metadata.etag == expected_etag
+        and (
+            expected_version_id is None
+            or metadata.version_id == expected_version_id
+        )
+    )
+
+
 class StorageProvider(ABC):
     provider_id: str
     schema_version: int

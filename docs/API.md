@@ -3,14 +3,14 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v3
-implementation_status: verified_delete_ready
+implementation_status: delete_recovery_audit_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
 
 > 面向对象：局域网内调用本服务的其他服务、接入 Agent，以及包含监控与存储设置功能的 Dashboard。
 >
-> 接口文档修订：`v3`（多存储预设、上传路由和严格删除已实现，删除恢复与完整审计待实现）；HTTP 路径命名空间继续使用 `/v1`。
+> 接口文档修订：`v3`（多存储预设、上传路由、严格删除、删除恢复与审计已实现，Dashboard v3 待实现）；HTTP 路径命名空间继续使用 `/v1`。
 >
 > 同步基线：`PLAN.md` v6
 >
@@ -2049,4 +2049,4 @@ curl --fail-with-body \
 - 设置请求优先通过局域网 HTTPS 发送，反向代理和调用方禁止记录请求体。
 - 局域网内任何可访问服务端口的客户端都能修改设置，网络边界需要覆盖 Dashboard 与设置 API。
 - Dashboard 本地统计表示本服务处理的上传；Provider 原生指标表示整个 Bucket 的活动。
-- 对象仍可能存在的任务不会按年龄清理；只有对象状态为 `absent` 或 `deleted` 的终态任务才适用默认 180 天保留期。日志默认保留 30 天或最多 100000 条。
+- 对象仍可能存在的任务不会按年龄清理；只有对象状态为 `absent` 或 `deleted` 的终态任务才适用默认 180 天保留期。普通日志默认保留 30 天或最多 100000 条，`object_delete_*` 删除审计永久保留。

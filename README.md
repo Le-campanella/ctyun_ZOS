@@ -102,7 +102,9 @@ curl -fsS -X DELETE \
   http://<内网IP>:8000/v1/upload-tasks/<task_id>/object
 ```
 
-删除请求不能提交 Bucket、Key、URL 或 VersionId。服务只使用任务绑定的原存储配置和对象元数据定位目标；预设禁用、默认切换或新增 revision 不改变删除目标。`202 DELETE_PENDING` 表示结果未知，不是删除成功；当前阶段尚未实现该状态的后台恢复。
+删除请求不能提交 Bucket、Key、URL 或 VersionId。服务只使用任务绑定的原存储配置和对象元数据定位目标；预设禁用、默认切换或新增 revision 不改变删除目标。`202 DELETE_PENDING` 表示结果未知，不是删除成功；启动和周期恢复会继续确认 `delete_unknown` 及超过 `STALE_DELETE_SECONDS`（默认 900 秒）的 `deleting` 任务。
+
+删除状态迁移会写入不含 token 的 `object_delete_*` 审计事件。这些事件不受普通日志的期限和条数清理影响；任务台账按保留策略清理后，删除审计仍然保留。
 
 ## 测试
 
@@ -113,7 +115,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果和数据库失败，以及多预设路由和在途快照、上传、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
+测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果、重启/陈旧任务恢复、永久审计和数据库失败，以及多预设路由和在途快照、上传、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、Dashboard 与设置接口。
 
 ## 部署到局域网服务器
 

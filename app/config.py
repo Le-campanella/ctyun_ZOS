@@ -41,6 +41,7 @@ class Settings:
     request_timeout_seconds: int = 600
     recovery_retry_seconds: int = 60
     stale_upload_seconds: int = 900
+    stale_delete_seconds: int = 900
     storage_probe_interval_seconds: int = 30
     storage_probe_max_age_seconds: int = 60
     task_retention_days: int = 180
@@ -78,6 +79,7 @@ class Settings:
             request_timeout_seconds=_integer("REQUEST_TIMEOUT_SECONDS", 600, 1),
             recovery_retry_seconds=_integer("RECOVERY_RETRY_SECONDS", 60, 1),
             stale_upload_seconds=_integer("STALE_UPLOAD_SECONDS", 900, 1),
+            stale_delete_seconds=_integer("STALE_DELETE_SECONDS", 900, 1),
             storage_probe_interval_seconds=_integer(
                 "STORAGE_PROBE_INTERVAL_SECONDS", 30, 1
             ),

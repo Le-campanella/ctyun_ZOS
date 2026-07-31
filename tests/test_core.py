@@ -303,6 +303,17 @@ def test_summary_percentile_log_pagination_and_retention(database: Database):
                 "request_id": "keep" if index % 2 else "other",
             }
         )
+    database.write_log(
+        {
+            "created_at": (now - timedelta(days=365)).isoformat(),
+            "level_no": NOTIFY,
+            "level_name": "NOTIFY",
+            "event": "object_delete_succeeded",
+            "message": "permanent audit",
+            "request_id": "delete-request",
+            "task_id": "deleted-task",
+        }
+    )
     first = database.list_logs(min_level=NOTIFY, limit=2)
     second = database.list_logs(
         min_level=NOTIFY, limit=2, before_id=first[-1]["id"]
@@ -318,7 +329,14 @@ def test_summary_percentile_log_pagination_and_retention(database: Database):
             min_level=NOTIFY, limit=10, filters={"unsafe_column": "value"}
         )
     database.maintain(task_retention_days=180, log_retention_days=30, log_max_rows=3)
-    assert len(database.list_logs(min_level=NOTIFY, limit=10)) == 3
+    assert len(database.list_logs(min_level=NOTIFY, limit=10)) == 4
+    audit = database.list_logs(
+        min_level=NOTIFY,
+        limit=10,
+        filters={"event": "object_delete_succeeded"},
+    )
+    assert len(audit) == 1
+    assert audit[0]["message"] == "permanent audit"
 
 
 class FakeS3:

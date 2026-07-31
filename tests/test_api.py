@@ -809,6 +809,15 @@ def test_verified_delete_is_version_exact_and_idempotent(client):
     assert detail["delete_started_at"] is not None
     assert upload["delete_token"] not in client.get("/v1/upload-tasks").text
     assert upload["delete_token"] not in client.get("/dashboard").text
+    started = client.get(
+        "/v1/dashboard/logs?event=object_delete_started"
+    ).json()["items"]
+    succeeded = client.get(
+        "/v1/dashboard/logs?event=object_delete_succeeded"
+    ).json()["items"]
+    assert started[0]["details"]["to_status"] == "deleting"
+    assert succeeded[0]["details"]["provider_result"] == "confirmed_absent"
+    assert upload["delete_token"] not in str(started + succeeded)
 
 
 def test_delete_rejects_invalid_capability_body_and_legacy_task(client):
@@ -934,6 +943,121 @@ def test_delete_provider_failure_is_never_reported_as_success(
     task = client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
     assert task["object_status"] == object_status
     assert task["delete_error_code"] == code
+
+
+def test_restart_recovers_uncertain_delete_to_deleted(
+    settings, database, registry
+):
+    first_app = create_app(
+        settings=settings,
+        registry=registry,
+        database=database,
+        background=False,
+    )
+    with TestClient(first_app, raise_server_exceptions=False) as first_client:
+        activate(
+            first_client,
+            uncertain_delete=True,
+            delete_before_timeout=True,
+        )
+        upload = first_client.post(
+            "/v1/uploads", files={"file": ("restart.txt", b"payload")}
+        ).json()
+        pending = first_client.delete(
+            f"/v1/upload-tasks/{upload['task_id']}/object",
+            headers={"X-Delete-Token": upload["delete_token"]},
+        )
+        assert pending.status_code == 202
+
+    second_app = create_app(
+        settings=settings,
+        registry=registry,
+        database=database,
+        background=False,
+    )
+    with TestClient(second_app, raise_server_exceptions=False) as second_client:
+        recovered = second_client.get(
+            f"/v1/upload-tasks/{upload['task_id']}"
+        ).json()
+        assert recovered["object_status"] == "deleted"
+        assert recovered["deleted_at"] is not None
+        audit = second_client.get(
+            "/v1/dashboard/logs?event=object_delete_recovered"
+        ).json()["items"]
+        assert audit[0]["task_id"] == upload["task_id"]
+        assert audit[0]["details"]["from_status"] == "delete_unknown"
+        assert audit[0]["details"]["to_status"] == "deleted"
+
+
+@pytest.mark.parametrize(
+    ("changed", "expected_status", "expected_error"),
+    [
+        (False, "present", "DELETE_FAILED"),
+        (True, "present", "OBJECT_CHANGED"),
+    ],
+)
+def test_delete_recovery_handles_present_object_conservatively(
+    client, changed, expected_status, expected_error
+):
+    activate(client, uncertain_delete=True)
+    upload = client.post(
+        "/v1/uploads", files={"file": ("recover.txt", b"payload")}
+    ).json()
+    pending = client.delete(
+        f"/v1/upload-tasks/{upload['task_id']}/object",
+        headers={"X-Delete-Token": upload["delete_token"]},
+    )
+    assert pending.status_code == 202
+    if changed:
+        FakeProvider.etags[upload["key"]] = '"changed-etag"'
+
+    client.portal.call(client.app.state.runtime.recover)
+    task = client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
+    assert task["object_status"] == expected_status
+    assert task["delete_error_code"] == expected_error
+
+
+@pytest.mark.parametrize(
+    ("object_exists", "expected_status"),
+    [(False, "deleted"), (True, "present")],
+)
+def test_recovery_claims_only_stale_deleting_tasks(
+    client, object_exists, expected_status
+):
+    activate(client)
+    upload = client.post(
+        "/v1/uploads", files={"file": ("stale.txt", b"payload")}
+    ).json()
+    runtime = client.app.state.runtime
+    runtime.database.update_task(
+        upload["task_id"],
+        object_status="deleting",
+        delete_request_id="stale-delete",
+        delete_started_at="2026-01-01T00:00:00Z",
+    )
+    if not object_exists:
+        FakeProvider.objects.pop(upload["key"])
+    recent = client.post(
+        "/v1/uploads", files={"file": ("recent.txt", b"payload")}
+    ).json()
+    runtime.database.update_task(
+        recent["task_id"],
+        object_status="deleting",
+        delete_request_id="recent-delete",
+        delete_started_at=utc_now(),
+    )
+
+    client.portal.call(runtime.recover)
+    task = client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
+    recent_task = client.get(
+        f"/v1/upload-tasks/{recent['task_id']}"
+    ).json()
+    assert task["object_status"] == expected_status
+    assert recent_task["object_status"] == "deleting"
+    if expected_status == "deleted":
+        assert task["deleted_at"] is not None
+    else:
+        assert task["delete_error_code"] == "DELETE_FAILED"
 
 
 def test_concurrent_delete_has_one_provider_caller(client):

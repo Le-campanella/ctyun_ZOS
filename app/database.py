@@ -897,6 +897,22 @@ class Database:
             rows = connection.execute(query, values).fetchall()
         return [dict(row) for row in rows]
 
+    def pending_deletions(self, stale_before: str) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM upload_tasks
+                WHERE object_status='delete_unknown'
+                OR (
+                    object_status='deleting'
+                    AND delete_started_at<?
+                )
+                ORDER BY delete_started_at, id
+                """,
+                (stale_before,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def write_log(self, record: dict[str, Any]) -> None:
         with self.transaction() as connection:
             connection.execute(
@@ -1033,12 +1049,18 @@ class Database:
                 (task_cutoff,),
             )
             connection.execute(
-                "DELETE FROM service_logs WHERE created_at<?", (log_cutoff,)
+                """
+                DELETE FROM service_logs
+                WHERE created_at<? AND event NOT LIKE 'object_delete_%'
+                """,
+                (log_cutoff,),
             )
             connection.execute(
                 """
                 DELETE FROM service_logs WHERE id IN (
-                    SELECT id FROM service_logs ORDER BY id DESC LIMIT -1 OFFSET ?
+                    SELECT id FROM service_logs
+                    WHERE event NOT LIKE 'object_delete_%'
+                    ORDER BY id DESC LIMIT -1 OFFSET ?
                 )
                 """,
                 (log_max_rows,),
