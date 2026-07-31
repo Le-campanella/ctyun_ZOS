@@ -3,14 +3,14 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v3
-implementation_status: multi_preset_api_ready
+implementation_status: upload_preset_routing_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
 
 > 面向对象：局域网内调用本服务的其他服务、接入 Agent，以及包含监控与存储设置功能的 Dashboard。
 >
-> 接口文档修订：`v3`（删除与多存储预设能力设计已确认，待实现）；HTTP 路径命名空间继续使用 `/v1`。
+> 接口文档修订：`v3`（多存储预设及上传路由已实现，严格删除能力待实现）；HTTP 路径命名空间继续使用 `/v1`。
 >
 > 同步基线：`PLAN.md` v6
 >

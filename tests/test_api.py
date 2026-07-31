@@ -159,7 +159,7 @@ def test_unconfigured_service_still_serves_health_settings_and_dashboard(client)
     assert client.get("/dashboard").status_code == 200
     upload = client.post("/v1/uploads", files={"file": ("a.txt", b"a")})
     assert upload.status_code == 503
-    assert upload.json()["error"]["code"] == "STORAGE_NOT_CONFIGURED"
+    assert upload.json()["error"]["code"] == "STORAGE_DEFAULT_NOT_CONFIGURED"
 
 
 def test_openapi_and_first_upload_response_contract(client, database):
@@ -496,7 +496,174 @@ def test_storage_preset_management_api_lifecycle(client):
         files={"file": ("a.txt", b"still-default")},
     )
     assert upload.status_code == 201
-    assert upload.json()["storage_preset"] == "archive"
+    assert upload.json()["storage_preset"] == "main"
+    assert upload.json()["url"].startswith("https://files.example/")
+
+
+def test_upload_routes_by_preset_and_scopes_idempotency(client):
+    activate(client)
+    runtime = client.app.state.runtime
+    client.portal.call(
+        runtime.create_storage_preset,
+        "archive",
+        "Archive",
+        storage_payload(public_base_url="https://archive.example"),
+    )
+
+    headers = {
+        "X-Storage-Preset": "archive",
+        "Idempotency-Key": "archive-job",
+    }
+    first = client.post(
+        "/v1/uploads", headers=headers, files={"file": ("a.txt", b"archive")}
+    )
+    replay = client.post(
+        "/v1/uploads",
+        headers={"Idempotency-Key": "archive-job"},
+        files={"file": ("ignored.txt", b"ignored")},
+    )
+    same_scope = client.post(
+        "/v1/uploads", headers=headers, files={"file": ("ignored.txt", b"ignored")}
+    )
+    mismatch = client.post(
+        "/v1/uploads",
+        headers={
+            "X-Storage-Preset": "default",
+            "Idempotency-Key": "archive-job",
+        },
+        files={"file": ("ignored.txt", b"ignored")},
+    )
+
+    assert first.status_code == 201
+    assert first.json()["storage_preset"] == "archive"
+    assert first.json()["url"].startswith("https://archive.example/")
+    assert replay.status_code == same_scope.status_code == 200
+    assert (
+        replay.json()["task_id"]
+        == same_scope.json()["task_id"]
+        == first.json()["task_id"]
+    )
+    assert mismatch.status_code == 409
+    assert mismatch.json()["error"]["code"] == "IDEMPOTENCY_SCOPE_MISMATCH"
+    assert mismatch.json()["task_id"] == first.json()["task_id"]
+
+    runtime.update_storage_preset("archive", 1, enabled=False)
+    disabled_replay = client.post(
+        "/v1/uploads",
+        headers=headers,
+        files={"file": ("ignored.txt", b"ignored")},
+    )
+    disabled_new = client.post(
+        "/v1/uploads",
+        headers={"X-Storage-Preset": "archive"},
+        files={"file": ("new.txt", b"new")},
+    )
+    missing = client.post(
+        "/v1/uploads",
+        headers={"X-Storage-Preset": "missing"},
+        files={"file": ("new.txt", b"new")},
+    )
+    invalid = client.post(
+        "/v1/uploads",
+        headers={"X-Storage-Preset": "Bad_Key"},
+        files={"file": ("new.txt", b"new")},
+    )
+
+    assert disabled_replay.status_code == 200
+    assert disabled_new.status_code == 409
+    assert disabled_new.json()["error"]["code"] == "STORAGE_PRESET_DISABLED"
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "STORAGE_PRESET_NOT_FOUND"
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "STORAGE_PRESET_INVALID"
+
+    runtime.update_storage_preset("archive", 2, enabled=True)
+    with runtime.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE storage_configs SET status='inactive'
+            WHERE preset_id=(
+                SELECT id FROM storage_presets WHERE preset_key='archive'
+            )
+            """
+        )
+    runtime._load_active()
+    not_configured = client.post(
+        "/v1/uploads",
+        headers={"X-Storage-Preset": "archive"},
+        files={"file": ("new.txt", b"new")},
+    )
+    assert not_configured.status_code == 503
+    assert not_configured.json()["error"]["code"] == "STORAGE_NOT_CONFIGURED"
+
+    client.portal.call(
+        runtime.create_storage_preset,
+        "broken",
+        "Broken",
+        storage_payload(fail_upload=True),
+    )
+    failed = client.post(
+        "/v1/uploads",
+        headers={"X-Storage-Preset": "broken"},
+        files={"file": ("failed.txt", b"failed")},
+    )
+    assert failed.status_code == 502
+    assert failed.json()["error"]["code"] == "UPLOAD_FAILED"
+    detail = client.get(f"/v1/upload-tasks/{failed.json()['task_id']}").json()
+    assert detail["storage_preset"] == "broken"
+    tasks = client.get("/v1/upload-tasks").json()["items"]
+    assert {item["storage_preset"] for item in tasks} == {"archive", "broken"}
+
+
+def test_upload_freezes_selected_preset_revision(client):
+    activate(client)
+    runtime = client.app.state.runtime
+    client.portal.call(
+        runtime.create_storage_preset,
+        "archive",
+        "Archive",
+        storage_payload(
+            public_base_url="https://archive-v1.example",
+            block_upload=True,
+        ),
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(
+            client.post,
+            "/v1/uploads",
+            headers={"X-Storage-Preset": "archive"},
+            files={"file": ("first.bin", b"one")},
+        )
+        assert FakeProvider.upload_started.wait(2)
+        client.portal.call(
+            runtime.activate_storage,
+            storage_payload(
+                revision=1,
+                credentials=False,
+                public_base_url="https://archive-v2.example",
+            ),
+            "archive",
+        )
+        FakeProvider.upload_release.set()
+        first_response = first.result(timeout=3)
+
+    second = client.post(
+        "/v1/uploads",
+        headers={"X-Storage-Preset": "archive"},
+        files={"file": ("second.bin", b"two")},
+    )
+    assert first_response.status_code == second.status_code == 201
+    assert first_response.json()["url"].startswith("https://archive-v1.example/")
+    assert second.json()["url"].startswith("https://archive-v2.example/")
+    first_task = client.get(
+        f"/v1/upload-tasks/{first_response.json()['task_id']}"
+    ).json()
+    second_task = client.get(
+        f"/v1/upload-tasks/{second.json()['task_id']}"
+    ).json()
+    assert first_task["storage_config_revision"] == 1
+    assert second_task["storage_config_revision"] == 2
 
 
 def test_settings_require_header_and_revision_and_keep_old_on_probe_failure(client):

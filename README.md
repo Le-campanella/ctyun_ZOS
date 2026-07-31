@@ -6,7 +6,7 @@
 
 - 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
 - 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
-- 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API，现有默认预设兼容接口继续可用。上传接口暂未读取 `X-Storage-Preset`。
+- 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API。上传接口可通过 `X-Storage-Preset` 选择已启用预设，未传时使用默认项。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 
@@ -37,7 +37,7 @@ docker compose ps
 - 存活检查：`http://<内网IP>:8000/healthz`
 - 就绪检查：`http://<内网IP>:8000/readyz`
 
-服务未配置 ZOS 时仍可访问 Dashboard 和设置页，`/readyz` 与上传接口会返回 `STORAGE_NOT_CONFIGURED`。在设置页填写 SDK Endpoint、Bucket、公网访问根地址及 AK/SK，先测试连接，再保存激活。
+服务未配置 ZOS 时仍可访问 Dashboard 和设置页；`/readyz` 返回 `STORAGE_NOT_CONFIGURED`，未指定预设的上传接口返回 `STORAGE_DEFAULT_NOT_CONFIGURED`。在设置页填写 SDK Endpoint、Bucket、公网访问根地址及 AK/SK，先测试连接，再保存激活。
 
 ## 数据库升级
 
@@ -68,9 +68,12 @@ curl -fsS -F 'file=@./example.pdf' \
 curl -fsS \
   -H 'X-Request-ID: caller-service-001' \
   -H 'Idempotency-Key: business-job-001' \
+  -H 'X-Storage-Preset: archive' \
   -F 'file=@./example.pdf' \
   http://<内网IP>:8000/v1/uploads
 ```
+
+`X-Storage-Preset` 可省略；省略时使用当前默认预设。显式预设不存在、被禁用或上传失败时直接报错，不会回退到默认预设。幂等键会绑定首次任务使用的预设。
 
 成功响应：
 
@@ -99,7 +102,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖上传成功/失败/待确认、HeadObject 缺失/超时/大小不一致、元数据持久化、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
+测试覆盖多预设路由和在途快照、上传成功/失败/待确认、HeadObject 缺失/超时/大小不一致、元数据持久化、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
 
 ## 部署到局域网服务器
 

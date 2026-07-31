@@ -180,6 +180,27 @@ class Runtime:
             key = preset_key if preset_key is not None else self._default_preset_key
             return self._snapshots_by_key.get(key) if key is not None else None
 
+    def resolve_upload_snapshot(
+        self, preset_key: str | None
+    ) -> StorageSnapshot:
+        if preset_key is None:
+            snapshot = self.active_snapshot()
+            if snapshot is None:
+                raise ProviderError(
+                    "STORAGE_DEFAULT_NOT_CONFIGURED",
+                    "默认存储预设尚未配置",
+                )
+            return snapshot
+        preset = self.database.storage_preset_by_key(preset_key)
+        if preset is None:
+            raise ProviderError("STORAGE_PRESET_NOT_FOUND", "存储预设不存在")
+        if not preset["enabled"]:
+            raise ProviderError("STORAGE_PRESET_DISABLED", "存储预设已禁用")
+        snapshot = self.active_snapshot(preset_key)
+        if snapshot is None:
+            raise ProviderError("STORAGE_NOT_CONFIGURED", "存储预设尚未配置")
+        return snapshot
+
     def snapshots(self) -> dict[str, StorageSnapshot]:
         with self._active_lock:
             return dict(self._snapshots_by_key)

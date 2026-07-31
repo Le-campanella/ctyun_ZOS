@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import anyio
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -327,6 +327,7 @@ def _task_item(task: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     item = {
         "id": task["id"],
         "request_id": task["request_id"],
+        "storage_preset": task["storage_preset"],
         "storage_provider": task.get("storage_provider"),
         "storage_config_revision": task.get("storage_config_revision"),
         "filename": task["filename"],
@@ -365,11 +366,49 @@ def _upload_response(
 
 
 def _provider_status(error: ProviderError) -> int:
+    if error.code == "STORAGE_PRESET_NOT_FOUND":
+        return 404
+    if error.code == "STORAGE_PRESET_DISABLED":
+        return 409
     if error.code in {"STORAGE_CONFIG_INVALID", "STORAGE_CREDENTIALS_REQUIRED"}:
         return 400
-    if error.code == "STORAGE_METRICS_UNAVAILABLE":
+    if error.code in {
+        "STORAGE_DEFAULT_NOT_CONFIGURED",
+        "STORAGE_METRICS_UNAVAILABLE",
+        "STORAGE_NOT_CONFIGURED",
+    }:
         return 503
     return 502
+
+
+def _existing_upload(
+    task: dict[str, Any], requested_preset: str | None
+) -> JSONResponse:
+    if (
+        requested_preset is not None
+        and requested_preset != task["storage_preset"]
+    ):
+        raise APIError(
+            409,
+            "IDEMPOTENCY_SCOPE_MISMATCH",
+            "该幂等键已绑定其他存储预设",
+            task_id=task["id"],
+        )
+    if task["status"] == "succeeded":
+        response = _no_store(_upload_response(task))
+        response.headers["Idempotency-Replayed"] = "true"
+        return response
+    code = (
+        "IDEMPOTENCY_KEY_REUSED"
+        if task["status"] == "failed"
+        else "UPLOAD_IN_PROGRESS"
+    )
+    raise APIError(
+        409,
+        code,
+        "该幂等键已经绑定上传任务",
+        task_id=task["id"],
+    )
 
 
 def _settings_request(request: Request) -> None:
@@ -745,12 +784,13 @@ def create_app(
             await source.close()
 
     @app.post("/v1/uploads", response_model=UploadResponse)
-    async def upload(request: Request):
+    async def upload(
+        request: Request,
+        x_storage_preset: str | None = Header(
+            default=None, alias="X-Storage-Preset"
+        ),
+    ):
         runtime: Runtime = request.app.state.runtime
-        snapshot = runtime.active_snapshot()
-        if snapshot is None:
-            raise APIError(503, "STORAGE_NOT_CONFIGURED", "尚未激活存储配置")
-        provider = snapshot.provider
         idempotency = request.headers.get("idempotency-key")
         if idempotency is not None:
             if not 1 <= len(idempotency) <= 128 or any(
@@ -759,24 +799,16 @@ def create_app(
                 raise APIError(400, "BAD_REQUEST", "Idempotency-Key 不合法")
             existing = runtime.database.task_by_idempotency(idempotency)
             if existing:
-                if existing["status"] == "succeeded":
-                    response = JSONResponse(
-                        _upload_response(existing),
-                        headers={"Cache-Control": "no-store"},
-                    )
-                    response.headers["Idempotency-Replayed"] = "true"
-                    return response
-                code = (
-                    "IDEMPOTENCY_KEY_REUSED"
-                    if existing["status"] == "failed"
-                    else "UPLOAD_IN_PROGRESS"
-                )
-                raise APIError(
-                    409,
-                    code,
-                    "该幂等键已经绑定上传任务",
-                    task_id=existing["id"],
-                )
+                return _existing_upload(existing, x_storage_preset)
+        if x_storage_preset is not None:
+            x_storage_preset = _preset_key(x_storage_preset)
+        try:
+            snapshot = runtime.resolve_upload_snapshot(x_storage_preset)
+        except ProviderError as exc:
+            raise APIError(
+                _provider_status(exc), exc.code, exc.message
+            ) from exc
+        provider = snapshot.provider
         source = await _upload_file(request, runtime)
         filename = _filename(source.filename)
         content_type = _content_type(source.content_type)
@@ -807,13 +839,8 @@ def create_app(
             runtime.database.create_task(task)
         except sqlite3.IntegrityError:
             existing = runtime.database.task_by_idempotency(idempotency)
-            if existing and existing["status"] == "succeeded":
-                response = JSONResponse(
-                    _upload_response(existing),
-                    headers={"Cache-Control": "no-store"},
-                )
-                response.headers["Idempotency-Replayed"] = "true"
-                return response
+            if existing:
+                return _existing_upload(existing, snapshot.preset_key)
             raise APIError(
                 409,
                 "UPLOAD_IN_PROGRESS",
@@ -828,7 +855,11 @@ def create_app(
             "上传任务已开始",
             request_id=task["request_id"],
             task_id=task_id,
-            details={"filename": filename, "object_key": object_key},
+            details={
+                "filename": filename,
+                "object_key": object_key,
+                "storage_preset": snapshot.preset_key,
+            },
         )
         spool = SpooledTemporaryFile(
             max_size=runtime.settings.upload_spool_threshold_bytes,
@@ -949,6 +980,7 @@ def create_app(
                     "size_bytes": size,
                     "object_key": object_key,
                     "duration_ms": duration,
+                    "storage_preset": snapshot.preset_key,
                     "storage_provider": snapshot.provider_id,
                     "storage_config_revision": snapshot.revision,
                 },
