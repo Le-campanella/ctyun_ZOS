@@ -21,7 +21,14 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
 
 from .config import Settings
-from .database import Database, RevisionConflict, utc_now
+from .database import (
+    Database,
+    DefaultPresetConflict,
+    PresetNotFound,
+    PresetStateConflict,
+    RevisionConflict,
+    utc_now,
+)
 from .eventlog import NOTIFY
 from .models import (
     DashboardLogsResponse,
@@ -32,9 +39,15 @@ from .models import (
     ProviderSchemasResponse,
     ReadyResponse,
     ReceiveValidationResponse,
-    StorageCandidateRequest,
+    StorageDefaultRequest,
+    StoragePresetCreateRequest,
+    StoragePresetDetailResponse,
+    StoragePresetListResponse,
+    StoragePresetPatchRequest,
+    StoragePresetSaveResponse,
     StorageSaveResponse,
     StorageSettingsResponse,
+    StorageTestRequest,
     StorageTestResponse,
     StorageUpdateRequest,
     TaskDetailResponse,
@@ -54,6 +67,7 @@ from .security import issue_delete_token
 STATUS_VALUES = {"uploading", "unknown", "succeeded", "failed"}
 LEVELS = {"NOTIFY": 25, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 SAFE_EXTENSION = re.compile(r"^[a-z0-9]{1,10}$")
+SAFE_PRESET_KEY = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
 
 class APIError(Exception):
@@ -372,6 +386,18 @@ def _settings_request(request: Request) -> None:
             raise APIError(400, "STORAGE_CONFIG_INVALID", "设置请求 Origin 不合法")
 
 
+def _preset_key(value: str) -> str:
+    if not SAFE_PRESET_KEY.fullmatch(value):
+        raise APIError(400, "STORAGE_PRESET_INVALID", "preset_key 格式不合法")
+    return value
+
+
+def _no_store(body: Any, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        body, status_code=status_code, headers={"Cache-Control": "no-store"}
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     registry: ProviderRegistry | None = None,
@@ -413,9 +439,17 @@ def create_app(
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(request: Request, _exc: RequestValidationError):
+    async def validation_error(request: Request, exc: RequestValidationError):
+        preset_invalid = any(
+            error["loc"][-1] in {"preset_key", "expected_default_preset"}
+            for error in exc.errors()
+        )
         return JSONResponse(
-            error_body("BAD_REQUEST", "请求参数不合法", _request_id(request)),
+            error_body(
+                "STORAGE_PRESET_INVALID" if preset_invalid else "BAD_REQUEST",
+                "preset_key 格式不合法" if preset_invalid else "请求参数不合法",
+                _request_id(request),
+            ),
             status_code=400,
         )
 
@@ -464,24 +498,195 @@ def create_app(
         runtime: Runtime = request.app.state.runtime
         return {"items": runtime.registry.schemas()}
 
-    @app.get("/v1/settings/storage", response_model=StorageSettingsResponse)
-    async def current_storage(request: Request):
-        response = JSONResponse(request.app.state.runtime.current_storage())
-        response.headers["Cache-Control"] = "no-store"
-        return response
-
-    @app.post("/v1/settings/storage/test", response_model=StorageTestResponse)
-    async def test_storage(request: Request, payload: StorageCandidateRequest):
-        _settings_request(request)
+    @app.get(
+        "/v1/settings/storage/presets",
+        response_model=StoragePresetListResponse,
+    )
+    async def storage_presets(request: Request):
         try:
-            result = await request.app.state.runtime.test_storage(
-                payload.model_dump(exclude_none=True)
+            return _no_store(
+                {"items": request.app.state.runtime.storage_presets()}
+            )
+        except sqlite3.Error as exc:
+            raise APIError(500, "DATABASE_ERROR", "无法读取存储预设") from exc
+
+    @app.post(
+        "/v1/settings/storage/presets",
+        response_model=StoragePresetDetailResponse,
+        status_code=201,
+    )
+    async def create_storage_preset(
+        request: Request, payload: StoragePresetCreateRequest
+    ):
+        _settings_request(request)
+        body = payload.model_dump(exclude_none=True)
+        preset_key = body.pop("preset_key")
+        display_name = body.pop("display_name")
+        try:
+            if request.app.state.runtime.database.storage_preset_by_key(preset_key):
+                raise APIError(409, "PRESET_STATE_CONFLICT", "preset_key 已存在")
+            result = await request.app.state.runtime.create_storage_preset(
+                preset_key, display_name, body
             )
         except ProviderError as exc:
             raise APIError(_provider_status(exc), exc.code, exc.message) from exc
-        response = JSONResponse(result)
-        response.headers["Cache-Control"] = "no-store"
-        return response
+        except sqlite3.IntegrityError as exc:
+            raise APIError(409, "PRESET_STATE_CONFLICT", "preset_key 已存在") from exc
+        except sqlite3.Error as exc:
+            raise APIError(
+                500, "SETTINGS_STORAGE_ERROR", "无法保存存储预设"
+            ) from exc
+        return _no_store(result, 201)
+
+    @app.get(
+        "/v1/settings/storage/presets/{preset_key}",
+        response_model=StoragePresetDetailResponse,
+    )
+    async def storage_preset_detail(request: Request, preset_key: str):
+        preset_key = _preset_key(preset_key)
+        try:
+            result = request.app.state.runtime.storage_preset_detail(preset_key)
+        except PresetNotFound as exc:
+            raise APIError(
+                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
+            ) from exc
+        except sqlite3.Error as exc:
+            raise APIError(500, "DATABASE_ERROR", "无法读取存储预设") from exc
+        return _no_store(result)
+
+    @app.put(
+        "/v1/settings/storage/presets/{preset_key}",
+        response_model=StoragePresetSaveResponse,
+    )
+    async def save_storage_preset(
+        request: Request, preset_key: str, payload: StorageUpdateRequest
+    ):
+        _settings_request(request)
+        preset_key = _preset_key(preset_key)
+        try:
+            await request.app.state.runtime.activate_storage(
+                payload.model_dump(exclude_none=True), preset_key
+            )
+            result = (
+                request.app.state.runtime.storage_preset_detail(preset_key)
+                | {"previous_revision": payload.expected_revision}
+            )
+        except PresetNotFound as exc:
+            raise APIError(
+                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
+            ) from exc
+        except ProviderError as exc:
+            raise APIError(_provider_status(exc), exc.code, exc.message) from exc
+        except RevisionConflict as exc:
+            raise APIError(
+                409,
+                "CONFIG_REVISION_CONFLICT",
+                f"当前配置 revision 为 {exc.current_revision}",
+            ) from exc
+        except sqlite3.Error as exc:
+            raise APIError(
+                500, "SETTINGS_STORAGE_ERROR", "无法更新存储预设配置"
+            ) from exc
+        return _no_store(result)
+
+    @app.patch(
+        "/v1/settings/storage/presets/{preset_key}",
+        response_model=StoragePresetDetailResponse,
+    )
+    async def update_storage_preset(
+        request: Request, preset_key: str, payload: StoragePresetPatchRequest
+    ):
+        _settings_request(request)
+        preset_key = _preset_key(preset_key)
+        if payload.display_name is None and payload.enabled is None:
+            raise APIError(
+                400, "STORAGE_PRESET_INVALID", "至少提交一个可修改字段"
+            )
+        try:
+            request.app.state.runtime.update_storage_preset(
+                preset_key,
+                payload.expected_state_revision,
+                display_name=payload.display_name,
+                enabled=payload.enabled,
+            )
+            result = request.app.state.runtime.storage_preset_detail(preset_key)
+        except PresetNotFound as exc:
+            raise APIError(
+                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
+            ) from exc
+        except PresetStateConflict as exc:
+            raise APIError(
+                409,
+                "PRESET_STATE_CONFLICT",
+                f"当前预设状态 revision 为 {exc.current_revision}",
+            ) from exc
+        except ValueError as exc:
+            raise APIError(
+                409, "PRESET_STATE_CONFLICT", "当前默认预设不能禁用"
+            ) from exc
+        except sqlite3.Error as exc:
+            raise APIError(
+                500, "SETTINGS_STORAGE_ERROR", "无法更新存储预设状态"
+            ) from exc
+        return _no_store(result)
+
+    @app.put(
+        "/v1/settings/storage/default",
+        response_model=StoragePresetDetailResponse,
+    )
+    async def set_default_storage_preset(
+        request: Request, payload: StorageDefaultRequest
+    ):
+        _settings_request(request)
+        try:
+            await request.app.state.runtime.set_default_storage_preset(
+                payload.preset_key,
+                payload.expected_default_preset,
+                payload.expected_state_revision,
+            )
+            result = request.app.state.runtime.storage_preset_detail(
+                payload.preset_key
+            )
+        except PresetNotFound as exc:
+            raise APIError(
+                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
+            ) from exc
+        except DefaultPresetConflict as exc:
+            raise APIError(
+                409,
+                "DEFAULT_PRESET_CONFLICT",
+                f"当前默认预设为 {exc.current_default_preset}",
+            ) from exc
+        except ValueError as exc:
+            raise APIError(
+                409, "DEFAULT_PRESET_CONFLICT", "目标预设未启用"
+            ) from exc
+        except sqlite3.Error as exc:
+            raise APIError(
+                500, "SETTINGS_STORAGE_ERROR", "无法切换默认预设"
+            ) from exc
+        return _no_store(result)
+
+    @app.get("/v1/settings/storage", response_model=StorageSettingsResponse)
+    async def current_storage(request: Request):
+        return _no_store(request.app.state.runtime.current_storage())
+
+    @app.post("/v1/settings/storage/test", response_model=StorageTestResponse)
+    async def test_storage(request: Request, payload: StorageTestRequest):
+        _settings_request(request)
+        body = payload.model_dump(exclude_none=True)
+        preset_key = body.pop("preset_key", None)
+        try:
+            result = await request.app.state.runtime.test_storage(
+                body, preset_key
+            )
+        except PresetNotFound as exc:
+            raise APIError(
+                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
+            ) from exc
+        except ProviderError as exc:
+            raise APIError(_provider_status(exc), exc.code, exc.message) from exc
+        return _no_store(result)
 
     @app.put("/v1/settings/storage", response_model=StorageSaveResponse)
     async def save_storage(request: Request, payload: StorageUpdateRequest):
@@ -498,9 +703,7 @@ def create_app(
                 "CONFIG_REVISION_CONFLICT",
                 f"当前配置 revision 为 {exc.current_revision}",
             ) from exc
-        response = JSONResponse(result)
-        response.headers["Cache-Control"] = "no-store"
-        return response
+        return _no_store(result)
 
     @app.post("/v1/uploads/validate", response_model=ReceiveValidationResponse)
     async def validate_upload(request: Request):

@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v3，上传对象元数据确认、一次性删除凭证和多预设 Runtime 已经实现，但预设管理 API、显式上传路由与 DELETE API 尚未发布。[docs/PLAN.md](docs/PLAN.md) v6 和 [docs/API.md](docs/API.md) v3 的其余能力仍是未发布目标。
+第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v3，上传对象元数据确认、一次性删除凭证、多预设 Runtime 和管理 API 已经实现，但显式上传路由与 DELETE API 尚未发布。[docs/PLAN.md](docs/PLAN.md) v6 和 [docs/API.md](docs/API.md) v3 的其余能力仍是未发布目标。
 
 ## 已完成
 
@@ -55,14 +55,17 @@
 - 2026-07-31：完成存储预设 repository：支持独立配置 revision、显示名与启停状态 revision、原子默认切换，并保持预设 key 不可修改。
 - 2026-07-31：Runtime 改为不可变 `StorageSnapshot` 注册表，Provider 按 `storage_config_id` 缓存；设置更新原子替换目标预设快照，在途任务和历史恢复仍使用原配置。
 - 2026-07-31：验证两个预设隔离、默认切换、旧 Provider 快照保持和 HTTP 预设 API 尚未暴露；共 42 个自动测试通过。
+- 2026-07-31：开放预设列表、创建、详情、配置更新、显示名/启停和默认切换 API；写操作复用同源检查与 `X-Settings-Request`，响应统一 `Cache-Control: no-store`。
+- 2026-07-31：默认设置兼容接口增加预设状态字段；候选连接测试可通过 `preset_key` 安全复用目标预设已保存的凭证。
+- 2026-07-31：完成格式、唯一性、配置与状态 revision 冲突、禁用默认项、禁用项设默认、敏感字段清洗和完整管理生命周期测试；共 43 个自动测试通过。
 
 ## 尚未完成
 
-- 多预设设置 API、`X-Storage-Preset` 路由和 Dashboard。
+- `X-Storage-Preset` 上传路由和多预设 Dashboard。
 - DELETE API、严格删除、删除恢复与审计。
 - 完成接近 200 MiB、multipart、重启恢复等剩余真实 ZOS 压力与故障验收；基础 PDF 上传和公网访问已经通过。
 - 在目标局域网部署内网 HTTPS 反向代理、网络访问控制、数据库备份和 Bucket 生命周期规则；这些属于部署环境工作。
 
 ## 下一步
 
-进入下一提交：开放多预设管理 API，并保留默认设置兼容接口；完成对应测试和审查后再实现 `X-Storage-Preset` 上传路由。
+进入下一提交：实现 `X-Storage-Preset` 上传选择、禁用/不存在错误和幂等预设范围校验；完成对应测试和审查后再进入严格删除。

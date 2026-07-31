@@ -1,8 +1,27 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+
+PresetKey = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$",
+        min_length=1,
+        max_length=64,
+    ),
+]
+DisplayName = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[^\x00-\x1f\x7f]+$",
+    ),
+]
 
 
 class ContractModel(BaseModel):
@@ -49,6 +68,11 @@ class ConnectionTest(ContractModel):
 
 class StorageSettingsResponse(ContractModel):
     configured: bool
+    preset_key: str | None
+    display_name: str | None
+    enabled: bool | None
+    is_default: bool | None
+    state_revision: int | None
     provider: str | None
     provider_schema_version: int | None
     revision: int
@@ -71,16 +95,70 @@ class StorageTestResponse(ContractModel):
     checks: dict[str, Any]
 
 
-class StorageCandidateRequest(ContractModel):
+class StorageEnvelope(ContractModel):
     provider: str
     provider_schema_version: int = Field(ge=1)
     config: dict[str, Any]
     credentials: dict[str, str] | None = None
-    expected_revision: int | None = Field(default=None, ge=0)
 
 
-class StorageUpdateRequest(StorageCandidateRequest):
+class StorageTestRequest(StorageEnvelope):
+    preset_key: PresetKey | None = None
+
+
+class StorageUpdateRequest(StorageEnvelope):
     expected_revision: int = Field(ge=0)
+
+
+class StoragePresetCreateRequest(StorageEnvelope):
+    preset_key: PresetKey
+    display_name: DisplayName
+
+
+class StoragePresetPatchRequest(ContractModel):
+    expected_state_revision: int = Field(ge=1)
+    display_name: DisplayName | None = None
+    enabled: bool | None = None
+
+
+class StorageDefaultRequest(ContractModel):
+    preset_key: PresetKey
+    expected_default_preset: PresetKey
+    expected_state_revision: int = Field(ge=1)
+
+
+class StoragePresetSummaryResponse(ContractModel):
+    preset_key: str
+    display_name: str
+    enabled: bool
+    is_default: bool
+    state_revision: int
+    provider: str | None
+    provider_schema_version: int | None
+    config_revision: int | None
+    endpoint_host: str | None
+    bucket: str | None
+    last_connection_test: ConnectionTest | None
+    created_at: str
+    updated_at: str
+
+
+class StoragePresetListResponse(ContractModel):
+    items: list[StoragePresetSummaryResponse]
+
+
+class StoragePresetDetailResponse(StorageSettingsResponse):
+    preset_key: str
+    display_name: str
+    enabled: bool
+    is_default: bool
+    state_revision: int
+    created_at: str
+    updated_at: str
+
+
+class StoragePresetSaveResponse(StoragePresetDetailResponse):
+    previous_revision: int
 
 
 class UploadResponse(ContractModel):

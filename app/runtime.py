@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import anyio
 
 from .config import Settings
-from .database import Database, RevisionConflict, utc_now
+from .database import Database, PresetNotFound, RevisionConflict, utc_now
 from .eventlog import EventLogger, NOTIFY
 from .providers import (
     ProviderError,
@@ -231,6 +232,11 @@ class Runtime:
         if record is None:
             return {
                 "configured": False,
+                "preset_key": None,
+                "display_name": None,
+                "enabled": None,
+                "is_default": None,
+                "state_revision": None,
                 "provider": None,
                 "provider_schema_version": None,
                 "revision": 0,
@@ -247,6 +253,11 @@ class Runtime:
         access_key = credentials["access_key"]
         return {
             "configured": True,
+            "preset_key": record["preset_key"],
+            "display_name": record["display_name"],
+            "enabled": bool(record["enabled"]),
+            "is_default": bool(record["is_default"]),
+            "state_revision": record["state_revision"],
             "provider": record["provider"],
             "provider_schema_version": record["provider_schema_version"],
             "revision": record["revision"],
@@ -262,6 +273,52 @@ class Runtime:
                 "latency_ms": record["last_test_latency_ms"],
             },
             "activated_at": record["activated_at"],
+        }
+
+    def storage_presets(self) -> list[dict[str, Any]]:
+        items = []
+        for preset in self.database.list_storage_presets():
+            config_record = self.database.active_storage(preset["preset_key"])
+            config = (
+                json.loads(config_record["config_json"]) if config_record else {}
+            )
+            items.append(
+                {
+                    "preset_key": preset["preset_key"],
+                    "display_name": preset["display_name"],
+                    "enabled": bool(preset["enabled"]),
+                    "is_default": bool(preset["is_default"]),
+                    "state_revision": preset["state_revision"],
+                    "provider": preset["provider"],
+                    "provider_schema_version": preset["provider_schema_version"],
+                    "config_revision": preset["revision"],
+                    "endpoint_host": urlsplit(config.get("endpoint_url", "")).hostname,
+                    "bucket": config.get("bucket"),
+                    "last_connection_test": {
+                        "status": "ok",
+                        "tested_at": preset["last_tested_at"],
+                        "latency_ms": preset["last_test_latency_ms"],
+                    }
+                    if preset["last_tested_at"]
+                    else None,
+                    "created_at": preset["created_at"],
+                    "updated_at": preset["updated_at"],
+                }
+            )
+        return items
+
+    def storage_preset_detail(self, preset_key: str) -> dict[str, Any]:
+        preset = self.database.storage_preset_by_key(preset_key)
+        if preset is None:
+            raise PresetNotFound(preset_key)
+        return self.current_storage(preset_key) | {
+            "preset_key": preset["preset_key"],
+            "display_name": preset["display_name"],
+            "enabled": bool(preset["enabled"]),
+            "is_default": bool(preset["is_default"]),
+            "state_revision": preset["state_revision"],
+            "created_at": preset["created_at"],
+            "updated_at": preset["updated_at"],
         }
 
     def _candidate(
@@ -320,6 +377,11 @@ class Runtime:
     async def test_storage(
         self, payload: dict[str, Any], preset_key: str | None = None
     ) -> dict[str, Any]:
+        if (
+            preset_key is not None
+            and self.database.storage_preset_by_key(preset_key) is None
+        ):
+            raise PresetNotFound(preset_key)
         provider_id, schema_version, _, _, provider = self._candidate(
             payload, preset_key
         )
@@ -370,7 +432,7 @@ class Runtime:
             "存储预设已创建",
             details={"preset_key": preset_key, "provider": provider_id, "revision": 1},
         )
-        return self.current_storage(preset_key)
+        return self.storage_preset_detail(preset_key)
 
     def _storage_record(
         self,
@@ -398,6 +460,11 @@ class Runtime:
     async def activate_storage(
         self, payload: dict[str, Any], preset_key: str | None = None
     ) -> dict[str, Any]:
+        if (
+            preset_key is not None
+            and self.database.storage_preset_by_key(preset_key) is None
+        ):
+            raise PresetNotFound(preset_key)
         expected = payload.get("expected_revision")
         if not isinstance(expected, int) or expected < 0:
             raise ProviderError(
@@ -460,6 +527,16 @@ class Runtime:
             enabled=enabled,
         )
         self._load_active()
+        self.log.emit(
+            NOTIFY,
+            "preset_enabled"
+            if enabled is True
+            else "preset_disabled"
+            if enabled is False
+            else "preset_updated",
+            "存储预设状态已更新",
+            details={"preset_key": preset_key},
+        )
         return preset
 
     async def set_default_storage_preset(
@@ -473,6 +550,12 @@ class Runtime:
         )
         self._load_active()
         await self.probe()
+        self.log.emit(
+            NOTIFY,
+            "default_preset_changed",
+            "默认存储预设已切换",
+            details={"preset_key": preset_key},
+        )
         return preset
 
     async def probe(self) -> None:

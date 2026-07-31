@@ -287,7 +287,7 @@ def test_settings_activation_masks_credentials_and_preserves_them(client, databa
     assert b"test-ak" not in stored and b"test-sk" not in stored
 
 
-def test_runtime_keeps_independent_preset_snapshots_without_exposing_api(client):
+def test_runtime_keeps_independent_preset_snapshots(client):
     activate(client)
     runtime = client.app.state.runtime
     created = client.portal.call(
@@ -326,7 +326,177 @@ def test_runtime_keeps_independent_preset_snapshots_without_exposing_api(client)
     assert upload.status_code == 201
     assert upload.json()["storage_preset"] == "archive"
     assert upload.json()["url"].startswith("https://archive-v2.example/")
-    assert client.get("/v1/settings/storage/presets").status_code == 404
+
+
+def test_storage_preset_management_api_lifecycle(client):
+    empty = client.get("/v1/settings/storage/presets")
+    assert empty.json() == {"items": []}
+    assert empty.headers["Cache-Control"] == "no-store"
+
+    main = storage_payload()
+    main.pop("expected_revision")
+    main |= {"preset_key": "main", "display_name": "Main"}
+    no_header = client.post("/v1/settings/storage/presets", json=main)
+    assert no_header.status_code == 400
+
+    created_main = client.post(
+        "/v1/settings/storage/presets",
+        headers={"X-Settings-Request": "true"},
+        json=main,
+    )
+    assert created_main.status_code == 201
+    assert created_main.headers["Cache-Control"] == "no-store"
+    assert created_main.json()["is_default"] is True
+    assert created_main.json()["state_revision"] == 1
+    assert "test-ak" not in created_main.text
+
+    archive = storage_payload(public_base_url="https://archive.example")
+    archive.pop("expected_revision")
+    archive |= {"preset_key": "archive", "display_name": "Archive"}
+    created_archive = client.post(
+        "/v1/settings/storage/presets",
+        headers={"X-Settings-Request": "true"},
+        json=archive,
+    )
+    assert created_archive.status_code == 201
+    assert created_archive.json()["is_default"] is False
+
+    duplicate = client.post(
+        "/v1/settings/storage/presets",
+        headers={"X-Settings-Request": "true"},
+        json=archive,
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error"]["code"] == "PRESET_STATE_CONFLICT"
+    invalid = client.post(
+        "/v1/settings/storage/presets",
+        headers={"X-Settings-Request": "true"},
+        json=archive | {"preset_key": "Bad_Key"},
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "STORAGE_PRESET_INVALID"
+
+    listed = client.get("/v1/settings/storage/presets").json()["items"]
+    assert [item["preset_key"] for item in listed] == ["archive", "main"]
+    assert listed[0]["config_revision"] == 1
+    assert listed[0]["endpoint_host"] == "storage.internal"
+    assert all("config" not in item and "credentials" not in item for item in listed)
+    assert "test-ak" not in client.get("/v1/settings/storage/presets").text
+
+    detail = client.get("/v1/settings/storage/presets/archive")
+    assert detail.status_code == 200
+    assert detail.json()["config"]["public_base_url"] == "https://archive.example"
+    assert detail.json()["credentials"]["access_key_masked"] == "****t-ak"
+    missing = client.get("/v1/settings/storage/presets/missing")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "STORAGE_PRESET_NOT_FOUND"
+
+    candidate = storage_payload(credentials=False)
+    candidate.pop("expected_revision")
+    candidate["preset_key"] = "archive"
+    tested = client.post(
+        "/v1/settings/storage/test",
+        headers={"X-Settings-Request": "true"},
+        json=candidate,
+    )
+    assert tested.status_code == 200
+
+    update = storage_payload(
+        revision=1,
+        credentials=False,
+        public_base_url="https://archive-v2.example",
+    )
+    saved = client.put(
+        "/v1/settings/storage/presets/archive",
+        headers={"X-Settings-Request": "true"},
+        json=update,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["previous_revision"] == 1
+    assert saved.json()["revision"] == 2
+    stale_config = client.put(
+        "/v1/settings/storage/presets/archive",
+        headers={"X-Settings-Request": "true"},
+        json=update,
+    )
+    assert stale_config.status_code == 409
+    assert stale_config.json()["error"]["code"] == "CONFIG_REVISION_CONFLICT"
+
+    stale_state = client.patch(
+        "/v1/settings/storage/presets/archive",
+        headers={"X-Settings-Request": "true"},
+        json={"expected_state_revision": 99, "display_name": "Cold"},
+    )
+    assert stale_state.status_code == 409
+    renamed = client.patch(
+        "/v1/settings/storage/presets/archive",
+        headers={"X-Settings-Request": "true"},
+        json={
+            "expected_state_revision": 1,
+            "display_name": "Cold",
+            "enabled": False,
+        },
+    )
+    assert renamed.json()["state_revision"] == 2
+    disabled_default = client.put(
+        "/v1/settings/storage/default",
+        headers={"X-Settings-Request": "true"},
+        json={
+            "preset_key": "archive",
+            "expected_default_preset": "main",
+            "expected_state_revision": 2,
+        },
+    )
+    assert disabled_default.status_code == 409
+    assert disabled_default.json()["error"]["code"] == "DEFAULT_PRESET_CONFLICT"
+
+    enabled = client.patch(
+        "/v1/settings/storage/presets/archive",
+        headers={"X-Settings-Request": "true"},
+        json={"expected_state_revision": 2, "enabled": True},
+    )
+    assert enabled.json()["state_revision"] == 3
+    wrong_default = client.put(
+        "/v1/settings/storage/default",
+        headers={"X-Settings-Request": "true"},
+        json={
+            "preset_key": "archive",
+            "expected_default_preset": "wrong",
+            "expected_state_revision": 3,
+        },
+    )
+    assert wrong_default.status_code == 409
+
+    switched = client.put(
+        "/v1/settings/storage/default",
+        headers={"X-Settings-Request": "true"},
+        json={
+            "preset_key": "archive",
+            "expected_default_preset": "main",
+            "expected_state_revision": 3,
+        },
+    )
+    assert switched.status_code == 200
+    assert switched.json()["is_default"] is True
+    assert client.get("/v1/settings/storage").json()["preset_key"] == "archive"
+    cannot_disable_default = client.patch(
+        "/v1/settings/storage/presets/archive",
+        headers={"X-Settings-Request": "true"},
+        json={
+            "expected_state_revision": switched.json()["state_revision"],
+            "enabled": False,
+        },
+    )
+    assert cannot_disable_default.status_code == 409
+    assert cannot_disable_default.json()["error"]["code"] == "PRESET_STATE_CONFLICT"
+
+    upload = client.post(
+        "/v1/uploads",
+        headers={"X-Storage-Preset": "main"},
+        files={"file": ("a.txt", b"still-default")},
+    )
+    assert upload.status_code == 201
+    assert upload.json()["storage_preset"] == "archive"
 
 
 def test_settings_require_header_and_revision_and_keep_old_on_probe_failure(client):
@@ -518,13 +688,15 @@ def test_filename_content_type_and_multipart_edges(client):
 
 def test_settings_reject_cross_origin_and_endpoint_change_without_new_keys(client):
     activate(client)
+    candidate = storage_payload(revision=1, credentials=False)
+    candidate.pop("expected_revision")
     cross_origin = client.post(
         "/v1/settings/storage/test",
         headers={
             "X-Settings-Request": "true",
             "Origin": "https://attacker.example",
         },
-        json=storage_payload(revision=1, credentials=False),
+        json=candidate,
     )
     assert cross_origin.status_code == 400
 
