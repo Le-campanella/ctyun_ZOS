@@ -7,7 +7,8 @@
 - 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
 - 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
 - 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API。上传接口可通过 `X-Storage-Preset` 选择已启用预设，未传时使用默认项。
-- Dashboard 设置页已支持多预设创建、测试、更新、启停和默认切换；监控页可选择预设执行真实上传测试，并只读展示对象与删除状态。
+- Dashboard 设置页已支持多服务预设的创建、测试、更新、启停和默认切换；每项预设独立绑定 Provider、Endpoint、Bucket 和凭证。监控页可选择预设执行真实上传测试，并只读展示对象与删除状态。
+- 内置 Provider 包括 `ctyun_zos` 和 `s3_compatible`。后者适用于支持 S3 API、HeadObject、DeleteObject 和 `public-read` ACL 的其他对象存储服务；不声称兼容所有厂商私有协议。
 - `DELETE /v1/upload-tasks/{task_id}/object` 已开放严格删除：只接受任务级 `X-Delete-Token`，使用任务原配置校验对象元数据、精确删除 VersionId 并再次确认对象不存在。
 - 后台探测、恢复和维护任务由 supervisor 自动重试；任一后台任务异常时 `/readyz` 降级并记录 CRITICAL 日志。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 仍是未发布目标契约；仓库实现已推进到 Dashboard v3，正式生产行为以部署版本为准。
@@ -40,7 +41,7 @@ docker compose ps
 - 存活检查：`http://<内网IP>:8000/healthz`
 - 就绪检查：`http://<内网IP>:8000/readyz`
 
-服务未配置 ZOS 时仍可访问 Dashboard 和设置页；`/readyz` 返回 `STORAGE_NOT_CONFIGURED`，未指定预设的上传接口返回 `STORAGE_DEFAULT_NOT_CONFIGURED`。在设置页填写 SDK Endpoint、Bucket、公网访问根地址及 AK/SK，先测试连接，再保存激活。
+服务未配置对象存储时仍可访问 Dashboard 和设置页；`/readyz` 返回 `STORAGE_NOT_CONFIGURED`，未指定预设的上传接口返回 `STORAGE_DEFAULT_NOT_CONFIGURED`。在设置页选择 Provider，填写 S3 API Endpoint、Bucket、公网访问根地址及 AK/SK，先测试连接，再保存激活。
 
 ## 数据库升级
 

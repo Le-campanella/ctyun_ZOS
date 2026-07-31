@@ -20,8 +20,11 @@
     <section class="hero">
       <div>
         <p class="eyebrow">STORAGE CONTROL</p>
-        <h1>存储预设管理</h1>
-        <p>为不同 ZOS Bucket 创建独立预设，并管理默认项、启停状态和配置版本。</p>
+        <h1>多服务存储预设</h1>
+        <p>每个预设独立绑定一个对象存储服务、Endpoint、Bucket 和访问凭证。</p>
+        <div class="service-flow" aria-label="预设组成">
+          <span>Provider</span><b>→</b><span>Endpoint</span><b>→</b><span>Bucket</span><b>→</b><span>公网地址</span>
+        </div>
       </div>
       <div class="revision-stack">
         <div class="revision-card"><span>配置 revision</span><strong id="revision">0</strong><small id="configured-state">尚未配置</small></div>
@@ -34,7 +37,7 @@
     <div class="preset-layout">
       <aside class="panel preset-sidebar" aria-labelledby="preset-list-title">
         <div class="section-heading compact">
-          <div><p class="eyebrow">PRESETS</p><h2 id="preset-list-title">存储预设</h2></div>
+          <div><p class="eyebrow">SERVICES</p><h2 id="preset-list-title">服务预设</h2></div>
           <button id="new-preset-button" class="button secondary small" type="button">新建</button>
         </div>
         <div id="preset-list" class="preset-list" aria-live="polite"><p class="empty">正在加载…</p></div>
@@ -42,7 +45,10 @@
 
       <form id="storage-form" class="settings-grid" autocomplete="off">
       <section class="panel form-panel">
-        <div class="section-heading compact"><div><p class="eyebrow">DESTINATION</p><h2>目标存储</h2></div></div>
+        <div class="section-heading compact">
+          <div><p class="eyebrow">SERVICE & DESTINATION</p><h2>存储服务与目标</h2></div>
+          <span class="badge neutral">一项预设 = 一个独立服务</span>
+        </div>
         <div class="form-grid">
           <label>预设 Key
             <input id="preset-key" required minlength="1" maxlength="64" pattern="[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?" placeholder="zos-main" spellcheck="false">
@@ -51,12 +57,20 @@
           <label>显示名称
             <input id="display-name" required maxlength="100" placeholder="主资料库">
           </label>
-          <label>Provider
-            <select id="provider" disabled><option value="ctyun_zos">天翼云对象存储 ZOS</option></select>
+          <label>存储服务类型
+            <select id="provider" required aria-describedby="provider-description"><option value="">正在加载…</option></select>
+            <small>天翼云使用专用 Provider；其他兼容服务选择 S3 兼容对象存储。</small>
           </label>
-          <label>SDK Endpoint
+          <div class="provider-summary wide">
+            <span id="provider-capability" class="badge neutral">等待选择</span>
+            <div>
+              <strong id="provider-name">存储服务能力</strong>
+              <p id="provider-description">选择 Provider 后显示兼容范围。</p>
+            </div>
+          </div>
+          <label>S3 API Endpoint
             <input id="endpoint-url" type="url" required placeholder="https://jiangsu-10.zos.ctyun.cn" spellcheck="false">
-            <small>用于 SDK 上传和连接测试的 Endpoint。</small>
+            <small>用于上传、HeadObject、删除和连接测试；不是公网文件地址。</small>
           </label>
           <label>Bucket
             <input id="bucket" required minlength="3" maxlength="63" placeholder="example-bucket" spellcheck="false">
@@ -88,8 +102,9 @@
           <label>读取超时（秒）<input id="read-timeout" type="number" min="1" max="3600" value="300" required></label>
           <label>重试次数<input id="max-attempts" type="number" min="0" max="5" value="2" required></label>
           <label class="check"><input id="verify-tls" type="checkbox" checked><span>校验 HTTPS 证书</span></label>
-          <label class="check"><input id="enable-metrics" type="checkbox"><span>启用 Bucket 指标</span></label>
+          <label id="metrics-field" class="check"><input id="enable-metrics" type="checkbox"><span>启用厂商扩展 Bucket 指标</span></label>
         </div>
+        <p id="metrics-note" class="muted">扩展指标只在对应 Provider 明确支持时可用。</p>
       </section>
 
       <section id="preset-state-panel" class="panel action-panel hidden">
@@ -118,7 +133,7 @@
     </div>
 
     <aside class="notice warning">
-      此页面无登录认证。只应绑定到可信局域网地址，并在正式环境使用内网 HTTPS。
+      此页面无登录认证，只应在可信局域网中使用。不同预设的凭证彼此独立，页面不会回填密钥。
     </aside>
   </main>
   <footer>密钥只在本次请求中使用，提交后立即从输入框清除。</footer>

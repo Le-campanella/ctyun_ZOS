@@ -25,6 +25,8 @@ from app.providers import (
     ObjectMetadata,
     ProviderError,
     ProviderRegistry,
+    S3CompatibleProvider,
+    default_registry,
 )
 from app.runtime import Runtime
 from app.security import (
@@ -478,6 +480,33 @@ def test_zos_client_uses_compatible_checksum_policy(settings, monkeypatch):
     config = captured["config"]
     assert config.request_checksum_calculation == "when_required"
     assert config.response_checksum_validation == "when_required"
+
+
+def test_default_registry_exposes_ctyun_and_generic_s3(settings):
+    schemas = {item["id"]: item for item in default_registry().schemas()}
+
+    assert set(schemas) == {"ctyun_zos", "s3_compatible"}
+    assert schemas["ctyun_zos"]["capabilities"]["bucket_metrics"] is True
+    assert schemas["s3_compatible"]["capabilities"] == {
+        "s3_compatible": True,
+        "public_read": True,
+        "bucket_metrics": False,
+    }
+    provider = S3CompatibleProvider(
+        valid_config(),
+        {"access_key": "ak", "secret_key": "sk"},
+        settings,
+        client=FakeS3(),
+    )
+    assert provider.provider_id == "s3_compatible"
+
+    with pytest.raises(ProviderError, match="不支持天翼云 Bucket"):
+        S3CompatibleProvider(
+            valid_config() | {"enable_bucket_metrics": True},
+            {"access_key": "ak", "secret_key": "sk"},
+            settings,
+            client=FakeS3(),
+        )
 
 
 @pytest.mark.parametrize(

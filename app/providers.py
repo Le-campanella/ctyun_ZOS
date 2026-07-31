@@ -199,7 +199,13 @@ class CtyunZosProvider(StorageProvider):
         return {
             "id": cls.provider_id,
             "display_name": "天翼云对象存储 ZOS",
+            "description": "天翼云 ZOS，支持标准上传、对象校验、严格删除和可选 Bucket 指标。",
             "schema_version": cls.schema_version,
+            "capabilities": {
+                "s3_compatible": True,
+                "public_read": True,
+                "bucket_metrics": True,
+            },
             "config_fields": [
                 {
                     "name": "endpoint_url",
@@ -345,7 +351,7 @@ class CtyunZosProvider(StorageProvider):
                 "AccessDenied",
             }:
                 error = "STORAGE_CREDENTIALS_REJECTED"
-                message = "ZOS 拒绝了当前访问凭证"
+                message = "对象存储服务拒绝了当前访问凭证"
             else:
                 error = "STORAGE_BUCKET_UNAVAILABLE"
                 message = "Bucket 不存在或当前凭证不可访问"
@@ -474,6 +480,38 @@ class CtyunZosProvider(StorageProvider):
         }
 
 
+class S3CompatibleProvider(CtyunZosProvider):
+    provider_id = "s3_compatible"
+
+    @classmethod
+    def settings_schema(cls) -> dict[str, Any]:
+        schema = super().settings_schema()
+        schema.update(
+            id=cls.provider_id,
+            display_name="S3 兼容对象存储",
+            description="用于其他支持 S3 API、HeadObject、DeleteObject 和 public-read ACL 的对象存储服务。",
+            capabilities={
+                "s3_compatible": True,
+                "public_read": True,
+                "bucket_metrics": False,
+            },
+        )
+        schema["config_fields"][0]["label"] = "S3 API Endpoint"
+        return schema
+
+    @classmethod
+    def validate(
+        cls, config: dict[str, Any], credentials: dict[str, str]
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        normalized, validated_credentials = super().validate(config, credentials)
+        if normalized["enable_bucket_metrics"]:
+            raise ProviderError(
+                "STORAGE_CONFIG_INVALID",
+                "通用 S3 Provider 不支持天翼云 Bucket 扩展指标",
+            )
+        return normalized, validated_credentials
+
+
 class ProviderRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, type[StorageProvider]] = {}
@@ -496,4 +534,5 @@ class ProviderRegistry:
 def default_registry() -> ProviderRegistry:
     registry = ProviderRegistry()
     registry.register(CtyunZosProvider)
+    registry.register(S3CompatibleProvider)
     return registry

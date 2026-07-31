@@ -2,7 +2,13 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
-  const state = { items: [], selected: null, detail: null, creating: false };
+  const state = {
+    items: [],
+    providers: [],
+    selected: null,
+    detail: null,
+    creating: false,
+  };
 
   function show(message, kind = "ok") {
     const box = $("message");
@@ -13,6 +19,38 @@
   function clearSecrets() {
     $("access-key").value = "";
     $("secret-key").value = "";
+  }
+
+  function providerById(providerId = $("provider").value) {
+    return state.providers.find((provider) => provider.id === providerId);
+  }
+
+  function providerName(providerId) {
+    return providerById(providerId)?.display_name || providerId || "未配置";
+  }
+
+  function renderProviderInfo() {
+    const provider = providerById();
+    if (!provider) {
+      $("provider-name").textContent = "存储服务能力";
+      $("provider-description").textContent = "选择 Provider 后显示兼容范围。";
+      $("provider-capability").textContent = "等待选择";
+      return;
+    }
+    const capabilities = provider.capabilities || {};
+    $("provider-name").textContent = provider.display_name;
+    $("provider-description").textContent = provider.description || "使用该 Provider 连接对象存储服务。";
+    $("provider-capability").textContent = [
+      capabilities.s3_compatible ? "S3 兼容" : null,
+      capabilities.public_read ? "公网对象" : null,
+      capabilities.bucket_metrics ? "扩展指标" : null,
+    ].filter(Boolean).join(" · ") || "专用协议";
+    const metrics = Boolean(capabilities.bucket_metrics);
+    $("enable-metrics").disabled = !metrics;
+    if (!metrics) $("enable-metrics").checked = false;
+    $("metrics-note").textContent = metrics
+      ? "该 Provider 支持厂商扩展 Bucket 指标；关闭不影响上传和本地统计。"
+      : "该 Provider 只使用标准 S3 能力，不提供厂商扩展 Bucket 指标。";
   }
 
   async function api(path, options = {}) {
@@ -59,7 +97,12 @@
         `配置 r${preset.config_revision ?? 0}`,
         `状态 r${preset.state_revision}`,
       ].filter(Boolean).join(" · ");
-      button.append(title, key, meta);
+      const service = document.createElement("span");
+      service.className = "preset-service";
+      service.textContent = providerName(preset.provider);
+      const destination = document.createElement("span");
+      destination.textContent = `${preset.endpoint_host || "未配置 Endpoint"} / ${preset.bucket || "未配置 Bucket"}`;
+      button.append(title, key, service, destination, meta);
       list.append(button);
     });
   }
@@ -77,6 +120,7 @@
     $("last-test").textContent = "尚无测试记录";
     $("save-button").textContent = "创建预设";
     $("preset-state-panel").classList.add("hidden");
+    renderProviderInfo();
     clearSecrets();
   }
 
@@ -102,6 +146,8 @@
     $("preset-key").value = data.preset_key;
     $("preset-key").disabled = true;
     $("display-name").value = data.display_name;
+    $("provider").value = data.provider;
+    renderProviderInfo();
     $("revision").textContent = String(data.revision);
     $("state-revision").textContent = String(data.state_revision);
     $("configured-state").textContent = `已于 ${new Date(data.activated_at).toLocaleString()} 激活`;
@@ -155,13 +201,31 @@
     else newPreset();
   }
 
+  async function loadProviders() {
+    const data = await api("/v1/settings/storage/providers");
+    state.providers = data.items;
+    const select = $("provider");
+    select.replaceChildren();
+    state.providers.forEach((provider) => {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.display_name;
+      select.append(option);
+    });
+    if (!state.providers.length) {
+      throw new Error("服务端没有可用的 Storage Provider");
+    }
+    renderProviderInfo();
+  }
+
   function storagePayload() {
     const credentials = {};
     if ($("access-key").value) credentials.access_key = $("access-key").value;
     if ($("secret-key").value) credentials.secret_key = $("secret-key").value;
+    const provider = providerById();
     const body = {
-      provider: "ctyun_zos",
-      provider_schema_version: 1,
+      provider: provider.id,
+      provider_schema_version: provider.schema_version,
       config: {
         endpoint_url: $("endpoint-url").value.trim(),
         bucket: $("bucket").value.trim(),
@@ -296,7 +360,17 @@
   }
 
   $("new-preset-button").addEventListener("click", newPreset);
+  $("provider").addEventListener("change", () => {
+    renderProviderInfo();
+    clearSecrets();
+    if (!state.creating && state.detail?.provider !== $("provider").value) {
+      show("切换存储服务类型需要重新提供完整 AK/SK，并会创建新的配置 revision。", "warning");
+    }
+  });
   $("endpoint-url").addEventListener("input", suggestPublicUrl);
   $("bucket").addEventListener("input", suggestPublicUrl);
-  loadPresets().catch((error) => show(error.message, "error"));
+  (async () => {
+    await loadProviders();
+    await loadPresets();
+  })().catch((error) => show(error.message, "error"));
 })();

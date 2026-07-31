@@ -272,8 +272,11 @@ def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     assert '"X-Storage-Preset": preset' in dashboard_js.text
     assert 'body.delete_token = "[REDACTED]"' in dashboard_js.text
     assert "/v1/settings/storage/presets" in settings_js.text
+    assert "/v1/settings/storage/providers" in settings_js.text
     assert "/v1/settings/storage/default" in settings_js.text
     assert "expected_state_revision" in settings_js.text
+    assert "provider: provider.id" in settings_js.text
+    assert 'provider: "ctyun_zos"' not in settings_js.text
     assert "storage_preset" in dashboard_js.text
     assert "delete_error_code" in dashboard_js.text
     assert "X-Delete-Token" not in dashboard_js.text

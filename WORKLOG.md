@@ -88,6 +88,10 @@
 - 2026-07-31：首次真实私有备份成功，保存 schema v3、28 条任务、1 个预设及 `SETTINGS_ENCRYPTION_KEY`；加密对象大小 18598 bytes。
 - 2026-07-31：从 ZOS 下载备份后完成摘要、解密和 `integrity_check`；恢复导出目录为 `700`、数据库和密钥文件为 `600`，任务数量与运行库一致，临时明文副本验证后已删除。
 - 2026-07-31：备份对象匿名 HEAD 返回 403；每日 02:17 的用户 crontab 已安装且保持单一任务，Bucket 的版本控制和 30 天合规保留由 ZOS 执行。
+- 2026-07-31：存储设置页从“天翼云 Bucket 列表”调整为“独立对象存储服务预设”；卡片展示 Provider、Endpoint 和 Bucket，新建与更新均从服务端 Provider schema 动态选择类型。
+- 2026-07-31：新增 `s3_compatible` Provider，复用已验证的 S3 上传、HeadObject、严格删除和公网 URL 流程；保留 `ctyun_zos` 的扩展 Bucket 指标能力。
+- 2026-07-31：通用 Provider 明确要求 S3 API、HeadObject、DeleteObject 和 `public-read` ACL，不假定兼容厂商私有协议；前端会按 Provider 能力启停扩展指标。
+- 2026-07-31：多服务预设 UI、Provider schema 和生产镜像验证通过，自动测试增加到 65 项。
 
 ## 尚未完成
 

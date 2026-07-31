@@ -3,7 +3,7 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v3
-implementation_status: private_backup_ready
+implementation_status: multi_provider_preset_ui_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
@@ -27,7 +27,7 @@ implementation_status: private_backup_ready
 5. 返回进程健康状态和服务就绪状态。
 6. 提供上传统计、流量时间序列、`NOTIFY` 及以上日志和可选 Storage Provider 原生指标；第一版为 ZOS Bucket 指标。
 7. 提供同源、无登录的 Web Dashboard，其中监控区域只读展示预设、对象与删除状态，设置页面可以管理多个存储预设。
-8. 提供 Provider 类型、多个存储预设、默认项、连接测试和配置 revision API。
+8. 提供 Provider 类型、多个独立存储服务预设、默认项、连接测试和配置 revision API；内置天翼云 ZOS 与通用 S3 兼容 Provider。
 9. 提供不会上传对象存储、不会创建任务记录的局域网文件接收测试。
 10. 使用上传成功时返回的对象级删除凭证，严格删除该任务创建的对象并保留审计记录。
 

@@ -224,11 +224,27 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
 .preset-item:hover, .preset-item.active { border-color: var(--blue); background: rgba(74, 168, 255, .1); }
 .preset-item code { color: var(--cyan); }
 .preset-item span { color: var(--muted); font-size: .72rem; }
+.preset-item .preset-service { color: var(--text); font-size: .78rem; font-weight: 650; }
 .form-panel > .muted { margin-top: -8px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .form-grid.three { grid-template-columns: repeat(3, 1fr); }
 .form-grid label { display: grid; align-content: start; gap: 8px; font-size: .85rem; font-weight: 650; }
 .form-grid label small { color: var(--muted); font-weight: 400; }
+.wide { grid-column: 1 / -1; }
+.provider-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(74, 168, 255, .06);
+}
+.provider-summary p { margin: 5px 0 0; color: var(--muted); font-size: .8rem; }
+.provider-summary .badge { flex: 0 0 auto; }
+.service-flow { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--muted); font-size: .76rem; }
+.service-flow span { padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); }
+.service-flow b { color: var(--cyan); }
 .field-hint { float: right; color: var(--cyan); font-size: .75rem; }
 .check { display: flex !important; grid-template-columns: auto 1fr; align-items: center; align-self: end; min-height: 43px; }
 .check input { width: 18px; height: 18px; }
@@ -256,6 +272,7 @@ footer { padding: 24px; border-top: 1px solid rgba(145, 164, 186, .12); color: v
   .preset-layout { grid-template-columns: 1fr; }
   .preset-sidebar { position: static; }
   .revision-stack { flex-direction: column; }
+  .service-flow { flex-wrap: wrap; }
   .section-heading { align-items: flex-start; flex-direction: column; }
   .log-entry { grid-template-columns: 72px 1fr; }
   .log-entry > div { grid-column: 1 / -1; }
