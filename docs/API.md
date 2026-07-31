@@ -3,7 +3,7 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v3
-implementation_status: dashboard_v3_ready
+implementation_status: reliability_deployment_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）

@@ -78,12 +78,17 @@
 - 2026-07-31：后台探测、恢复和维护循环增加统一 supervisor；异常写入 CRITICAL、就绪状态降级并自动重试，取消时干净退出。
 - 2026-07-31：部署配置移入被忽略的 `.deploy.env`；部署增加完整测试、运行镜像构建、远程 SQLite Online Backup、schema 识别、health/ready 检查及跨 schema 失败回滚。
 - 2026-07-31：增加最小 GitHub Actions 容器 CI 和真实 ZOS 并发上传、公网 HEAD、严格删除验收脚本；共 62 个自动测试通过。
+- 2026-07-31：提交 `e3f7067` 后执行安全部署；远程 schema v1 已在线备份并迁移到 v3，原 21 条任务完整保留，`integrity_check=ok`。
+- 2026-07-31：真实 ZOS 验收通过 1 MiB 单任务、4 个并发 20 MiB multipart、190 MiB 近上限文件及显式 `default` 预设上传；7 个对象均完成公网 HEAD 和严格删除，无验收对象遗留。
+- 2026-07-31：不存在 Bucket 的候选连接测试返回 `502 STORAGE_BUCKET_UNAVAILABLE`，当前 active revision 保持为 1。
+- 2026-07-31：受控重启后容器恢复 healthy，`/readyz` 显示 schema、恢复、存储探测和三个后台任务全部正常，`restart=unless-stopped`。
 
 ## 尚未完成
 
-- 完成接近 200 MiB、multipart、重启恢复等剩余真实 ZOS 压力与故障验收；基础 PDF 上传和公网访问已经通过。
+- 配置第二个真实 Bucket 和版本化 Bucket 后，验收跨 Bucket 路由、精确 VersionId 删除及外部替换对象保护。
+- 完成上传/删除过程断网或杀进程等破坏性故障注入；当前重启恢复和模拟故障测试已通过。
 - 在目标局域网部署内网 HTTPS 反向代理、网络访问控制、数据库备份和 Bucket 生命周期规则；这些属于部署环境工作。
 
 ## 下一步
 
-提交可靠性与部署改动后，将远程 schema v1 安全迁移到 v3，并执行真实 ZOS multipart、并发上传、公网访问、严格删除和重启验收。
+准备第二个测试 Bucket 后继续多预设与版本化对象验收；部署侧下一步是内网 HTTPS、访问控制、定时数据库备份和 Bucket 生命周期规则。
