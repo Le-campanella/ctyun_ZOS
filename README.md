@@ -6,7 +6,7 @@
 
 - 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
 - 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
-- 运行行为仍使用自动创建或迁移的 `default` 预设，尚未开放多预设 API。
+- 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；当前 HTTP 仍只开放默认预设兼容接口，尚未开放预设管理 API 和显式上传路由。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 

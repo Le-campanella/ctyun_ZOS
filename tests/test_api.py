@@ -287,6 +287,48 @@ def test_settings_activation_masks_credentials_and_preserves_them(client, databa
     assert b"test-ak" not in stored and b"test-sk" not in stored
 
 
+def test_runtime_keeps_independent_preset_snapshots_without_exposing_api(client):
+    activate(client)
+    runtime = client.app.state.runtime
+    created = client.portal.call(
+        runtime.create_storage_preset,
+        "archive",
+        "Archive",
+        storage_payload(public_base_url="https://archive.example"),
+    )
+    assert created["revision"] == 1
+    snapshots = runtime.snapshots()
+    assert set(snapshots) == {"default", "archive"}
+    assert runtime.active_snapshot().preset_key == "default"
+    old_archive = snapshots["archive"]
+
+    updated = storage_payload(
+        revision=1,
+        credentials=False,
+        public_base_url="https://archive-v2.example",
+    )
+    client.portal.call(runtime.activate_storage, updated, "archive")
+    assert runtime.active_snapshot("archive").revision == 2
+    assert runtime.active_snapshot("default").revision == 1
+    assert (
+        runtime.provider_for_config(old_archive.storage_config_id)
+        is old_archive.provider
+    )
+
+    client.portal.call(
+        runtime.set_default_storage_preset,
+        "archive",
+        "default",
+        1,
+    )
+    assert runtime.active_snapshot().preset_key == "archive"
+    upload = client.post("/v1/uploads", files={"file": ("a.txt", b"archive")})
+    assert upload.status_code == 201
+    assert upload.json()["storage_preset"] == "archive"
+    assert upload.json()["url"].startswith("https://archive-v2.example/")
+    assert client.get("/v1/settings/storage/presets").status_code == 404
+
+
 def test_settings_require_header_and_revision_and_keep_old_on_probe_failure(client):
     no_header = client.put("/v1/settings/storage", json=storage_payload())
     assert no_header.status_code == 400

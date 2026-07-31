@@ -547,7 +547,7 @@ def create_app(
         snapshot = runtime.active_snapshot()
         if snapshot is None:
             raise APIError(503, "STORAGE_NOT_CONFIGURED", "尚未激活存储配置")
-        storage, provider = snapshot
+        provider = snapshot.provider
         idempotency = request.headers.get("idempotency-key")
         if idempotency is not None:
             if not 1 <= len(idempotency) <= 128 or any(
@@ -588,7 +588,7 @@ def create_app(
             "id": task_id,
             "request_id": _request_id(request),
             "idempotency_key": idempotency,
-            "storage_config_id": storage["id"],
+            "storage_config_id": snapshot.storage_config_id,
             "filename": filename,
             "content_type": content_type,
             "object_key": object_key,
@@ -746,12 +746,12 @@ def create_app(
                     "size_bytes": size,
                     "object_key": object_key,
                     "duration_ms": duration,
-                    "storage_provider": storage["provider"],
-                    "storage_config_revision": storage["revision"],
+                    "storage_provider": snapshot.provider_id,
+                    "storage_config_revision": snapshot.revision,
                 },
             )
             task.update(
-                storage_preset=storage.get("preset_key", "default"),
+                storage_preset=snapshot.preset_key,
                 size_bytes=metadata.size_bytes,
                 etag=metadata.etag,
                 version_id=metadata.version_id,
@@ -947,18 +947,17 @@ def create_app(
         snapshot = runtime.active_snapshot()
         if snapshot is None:
             raise APIError(503, "STORAGE_NOT_CONFIGURED", "尚未激活存储配置")
-        storage, provider = snapshot
         try:
             result = await anyio.to_thread.run_sync(
-                provider.get_metrics, from_time, to_time
+                snapshot.provider.get_metrics, from_time, to_time
             )
         except ProviderError as exc:
             raise APIError(503, exc.code, exc.message) from exc
         return {
             **result,
-            "provider": storage["provider"],
-            "provider_schema_version": storage["provider_schema_version"],
-            "storage_config_revision": storage["revision"],
+            "provider": snapshot.provider_id,
+            "provider_schema_version": snapshot.provider_schema_version,
+            "storage_config_revision": snapshot.revision,
             "range": {"from": from_time, "to": to_time},
             "cache": None,
         }

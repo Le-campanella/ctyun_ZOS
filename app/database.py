@@ -479,14 +479,55 @@ class Database:
                 connection.rollback()
                 raise
 
-    def active_storage(self) -> dict[str, Any] | None:
+    def active_storage(self, preset_key: str | None = None) -> dict[str, Any] | None:
+        condition = "p.preset_key=?" if preset_key is not None else "p.is_default=1"
+        values = (preset_key,) if preset_key is not None else ()
         with closing(self.connect()) as connection:
             row = connection.execute(
-                """
-                SELECT c.*, p.preset_key FROM storage_configs c
+                f"""
+                SELECT c.*, p.preset_key, p.display_name, p.enabled,
+                       p.is_default, p.state_revision
+                FROM storage_configs c
                 JOIN storage_presets p ON p.id=c.preset_id
-                WHERE c.status='active' AND p.enabled=1 AND p.is_default=1
+                WHERE c.status='active' AND {condition}
+                """,
+                values,
+            ).fetchone()
+        return dict(row) if row else None
+
+    def active_storages(self) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
                 """
+                SELECT c.*, p.preset_key, p.display_name, p.enabled,
+                       p.is_default, p.state_revision
+                FROM storage_configs c
+                JOIN storage_presets p ON p.id=c.preset_id
+                WHERE c.status='active'
+                ORDER BY p.preset_key
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_storage_presets(self) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT p.*, c.id AS storage_config_id, c.revision,
+                       c.provider, c.provider_schema_version, c.activated_at,
+                       c.last_tested_at, c.last_test_latency_ms
+                FROM storage_presets p
+                LEFT JOIN storage_configs c
+                  ON c.preset_id=p.id AND c.status='active'
+                ORDER BY p.preset_key
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def storage_preset_by_key(self, preset_key: str) -> dict[str, Any] | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM storage_presets WHERE preset_key=?", (preset_key,)
             ).fetchone()
         return dict(row) if row else None
 
@@ -497,12 +538,88 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def activate_storage(self, record: dict[str, Any], expected_revision: int) -> dict:
+    def create_storage_preset(
+        self, preset: dict[str, Any], record: dict[str, Any]
+    ) -> dict[str, Any]:
         with self.transaction() as connection:
+            is_default = (
+                connection.execute("SELECT COUNT(*) FROM storage_presets").fetchone()[0]
+                == 0
+            )
+            connection.execute(
+                """
+                INSERT INTO storage_presets (
+                    id, preset_key, display_name, enabled, is_default,
+                    state_revision, created_at, updated_at
+                ) VALUES (?, ?, ?, 1, ?, 1, ?, ?)
+                """,
+                (
+                    preset["id"],
+                    preset["preset_key"],
+                    preset["display_name"],
+                    int(is_default),
+                    preset["created_at"],
+                    preset["updated_at"],
+                ),
+            )
+            self._insert_storage_config(connection, record, preset["id"], 1)
+        record.update(
+            preset_id=preset["id"],
+            preset_key=preset["preset_key"],
+            display_name=preset["display_name"],
+            enabled=1,
+            is_default=int(is_default),
+            state_revision=1,
+            revision=1,
+            status="active",
+        )
+        return record
+
+    @staticmethod
+    def _insert_storage_config(
+        connection: sqlite3.Connection,
+        record: dict[str, Any],
+        preset_id: str,
+        revision: int,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO storage_configs (
+                id, preset_id, revision, provider, provider_schema_version, config_json,
+                credentials_ciphertext, status, created_at, activated_at,
+                last_tested_at, last_test_latency_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                record["id"],
+                preset_id,
+                revision,
+                record["provider"],
+                record["provider_schema_version"],
+                record["config_json"],
+                record["credentials_ciphertext"],
+                record["created_at"],
+                record["activated_at"],
+                record["last_tested_at"],
+                record.get("last_test_latency_ms"),
+            ),
+        )
+
+    def activate_storage(
+        self,
+        record: dict[str, Any],
+        expected_revision: int,
+        preset_key: str | None = None,
+    ) -> dict:
+        with self.transaction() as connection:
+            condition = "preset_key=?" if preset_key is not None else "is_default=1"
+            values = (preset_key,) if preset_key is not None else ()
             preset = connection.execute(
-                "SELECT id, preset_key FROM storage_presets WHERE is_default=1"
+                f"SELECT * FROM storage_presets WHERE {condition}", values
             ).fetchone()
             if preset is None:
+                if preset_key is not None:
+                    raise PresetNotFound(preset_key)
                 now = record["created_at"]
                 preset_id = DEFAULT_PRESET_ID
                 if connection.execute(
@@ -539,35 +656,104 @@ class Database:
                 """,
                 (preset_id,),
             )
-            connection.execute(
-                """
-                INSERT INTO storage_configs (
-                    id, preset_id, revision, provider, provider_schema_version, config_json,
-                    credentials_ciphertext, status, created_at, activated_at,
-                    last_tested_at, last_test_latency_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
-                """,
-                (
-                    record["id"],
-                    preset_id,
-                    revision,
-                    record["provider"],
-                    record["provider_schema_version"],
-                    record["config_json"],
-                    record["credentials_ciphertext"],
-                    record["created_at"],
-                    record["activated_at"],
-                    record["last_tested_at"],
-                    record.get("last_test_latency_ms"),
-                ),
-            )
+            self._insert_storage_config(connection, record, preset_id, revision)
         record.update(
             preset_id=preset_id,
             preset_key=preset_key,
+            display_name=preset["display_name"] if preset else "默认 ZOS",
+            enabled=preset["enabled"] if preset else 1,
+            is_default=preset["is_default"] if preset else 1,
+            state_revision=preset["state_revision"] if preset else 1,
             revision=revision,
             status="active",
         )
         return record
+
+    def update_storage_preset(
+        self,
+        preset_key: str,
+        expected_state_revision: int,
+        *,
+        display_name: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        if display_name is None and enabled is None:
+            raise ValueError("no preset changes")
+        with self.transaction() as connection:
+            current = connection.execute(
+                "SELECT * FROM storage_presets WHERE preset_key=?", (preset_key,)
+            ).fetchone()
+            if current is None:
+                raise PresetNotFound(preset_key)
+            if current["state_revision"] != expected_state_revision:
+                raise PresetStateConflict(current["state_revision"])
+            if enabled is False and current["is_default"]:
+                raise ValueError("default preset cannot be disabled")
+            changes: dict[str, Any] = {
+                "state_revision": expected_state_revision + 1,
+                "updated_at": utc_now(),
+            }
+            if display_name is not None:
+                changes["display_name"] = display_name
+            if enabled is not None:
+                changes["enabled"] = int(enabled)
+            assignments = ", ".join(f"{name}=?" for name in changes)
+            connection.execute(
+                f"UPDATE storage_presets SET {assignments} WHERE id=?",
+                (*changes.values(), current["id"]),
+            )
+            return dict(current) | changes
+
+    def set_default_storage_preset(
+        self,
+        preset_key: str,
+        expected_default_preset: str,
+        expected_state_revision: int,
+    ) -> dict[str, Any]:
+        with self.transaction() as connection:
+            current = connection.execute(
+                "SELECT * FROM storage_presets WHERE is_default=1"
+            ).fetchone()
+            target = connection.execute(
+                "SELECT * FROM storage_presets WHERE preset_key=?", (preset_key,)
+            ).fetchone()
+            if target is None:
+                raise PresetNotFound(preset_key)
+            current_key = current["preset_key"] if current else None
+            if (
+                current_key != expected_default_preset
+                or target["state_revision"] != expected_state_revision
+            ):
+                raise DefaultPresetConflict(
+                    current_key, target["state_revision"]
+                )
+            if not target["enabled"]:
+                raise ValueError("default preset must be enabled")
+            if current and current["id"] == target["id"]:
+                return dict(target)
+            now = utc_now()
+            if current:
+                connection.execute(
+                    """
+                    UPDATE storage_presets
+                    SET is_default=0, state_revision=state_revision+1, updated_at=?
+                    WHERE id=?
+                    """,
+                    (now, current["id"]),
+                )
+            connection.execute(
+                """
+                UPDATE storage_presets
+                SET is_default=1, state_revision=state_revision+1, updated_at=?
+                WHERE id=?
+                """,
+                (now, target["id"]),
+            )
+            return dict(target) | {
+                "is_default": 1,
+                "state_revision": target["state_revision"] + 1,
+                "updated_at": now,
+            }
 
     def create_task(self, record: dict[str, Any]) -> None:
         columns = (
@@ -853,3 +1039,21 @@ class Database:
 class RevisionConflict(Exception):
     def __init__(self, current_revision: int):
         self.current_revision = current_revision
+
+
+class PresetNotFound(Exception):
+    def __init__(self, preset_key: str):
+        self.preset_key = preset_key
+
+
+class PresetStateConflict(Exception):
+    def __init__(self, current_revision: int):
+        self.current_revision = current_revision
+
+
+class DefaultPresetConflict(Exception):
+    def __init__(
+        self, current_default_preset: str | None, current_state_revision: int
+    ):
+        self.current_default_preset = current_default_preset
+        self.current_state_revision = current_state_revision

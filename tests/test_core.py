@@ -10,7 +10,14 @@ from uuid import uuid4
 import pytest
 from cryptography.fernet import Fernet
 
-from app.database import Database, RevisionConflict, SCHEMA_VERSION, utc_now
+from app.database import (
+    Database,
+    DefaultPresetConflict,
+    PresetStateConflict,
+    RevisionConflict,
+    SCHEMA_VERSION,
+    utc_now,
+)
 from app.eventlog import EventLogger, NOTIFY
 from app.providers import CtyunZosProvider, ObjectMetadata, ProviderError
 from app.security import CredentialCipher, hash_delete_token, issue_delete_token
@@ -95,6 +102,67 @@ def test_database_schema_activation_and_revision_conflict(database: Database, se
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
+
+
+def test_storage_preset_repository_keeps_revisions_and_default_atomic(
+    database: Database,
+):
+    now = utc_now()
+    archive = database.create_storage_preset(
+        {
+            "id": str(uuid4()),
+            "preset_key": "archive",
+            "display_name": "Archive",
+            "created_at": now,
+            "updated_at": now,
+        },
+        storage_record(b"archive"),
+    )
+    secondary = database.create_storage_preset(
+        {
+            "id": str(uuid4()),
+            "preset_key": "secondary",
+            "display_name": "Secondary",
+            "created_at": now,
+            "updated_at": now,
+        },
+        storage_record(b"secondary"),
+    )
+    secondary_v2 = database.activate_storage(
+        storage_record(b"secondary-v2"), 1, "secondary"
+    )
+
+    assert archive["is_default"] == 1
+    assert archive["revision"] == secondary["revision"] == 1
+    assert secondary_v2["revision"] == 2
+    assert database.active_storage()["preset_key"] == "archive"
+    assert database.active_storage("secondary")["id"] == secondary_v2["id"]
+    presets = database.list_storage_presets()
+    assert [item["preset_key"] for item in presets] == [
+        "archive",
+        "secondary",
+    ]
+    assert all("credentials_ciphertext" not in item for item in presets)
+
+    with pytest.raises(PresetStateConflict):
+        database.update_storage_preset("secondary", 0, display_name="Secondary v2")
+    renamed = database.update_storage_preset(
+        "secondary", 1, display_name="Secondary v2"
+    )
+    assert renamed["state_revision"] == 2
+
+    with pytest.raises(DefaultPresetConflict):
+        database.set_default_storage_preset("secondary", "wrong", 2)
+    assert database.active_storage()["preset_key"] == "archive"
+    switched = database.set_default_storage_preset("secondary", "archive", 2)
+    assert switched["state_revision"] == 3
+    assert database.active_storage()["preset_key"] == "secondary"
+    old_default = database.storage_preset_by_key("archive")
+    database.update_storage_preset(
+        "archive", old_default["state_revision"], enabled=False
+    )
+    with pytest.raises(ValueError, match="cannot be disabled"):
+        database.update_storage_preset("secondary", 3, enabled=False)
 
 
 def test_task_queries_are_stable_and_filterable(database: Database, settings):

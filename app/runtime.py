@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any
@@ -24,6 +25,19 @@ from .providers import (
 from .security import CredentialCipher
 
 
+@dataclass(frozen=True)
+class StorageSnapshot:
+    preset_id: str
+    preset_key: str
+    enabled: bool
+    is_default: bool
+    storage_config_id: str
+    revision: int
+    provider_id: str
+    provider_schema_version: int
+    provider: StorageProvider
+
+
 class Runtime:
     def __init__(
         self,
@@ -39,8 +53,9 @@ class Runtime:
         self.cipher = CredentialCipher(settings.encryption_key)
         self.log = EventLogger(self.database)
         self._active_lock = threading.RLock()
-        self._active_record: dict[str, Any] | None = None
-        self._active_provider: StorageProvider | None = None
+        self._snapshots_by_key: dict[str, StorageSnapshot] = {}
+        self._providers_by_config_id: dict[str, StorageProvider] = {}
+        self._default_preset_key: str | None = None
         self.schema_ready = False
         self.recovery_complete = False
         self.last_probe: dict[str, Any] = {
@@ -87,28 +102,86 @@ class Runtime:
             await asyncio.gather(*self._background, return_exceptions=True)
 
     def _load_active(self) -> None:
-        record = self.database.active_storage()
-        if record is None:
-            return
-        provider = self.provider_for_record(record)
+        snapshots = {
+            record["preset_key"]: self._snapshot(
+                record, self.provider_for_record(record)
+            )
+            for record in self.database.active_storages()
+        }
+        default = next(
+            (key for key, snapshot in snapshots.items() if snapshot.is_default),
+            None,
+        )
         with self._active_lock:
-            self._active_record, self._active_provider = record, provider
+            self._snapshots_by_key = snapshots
+            self._default_preset_key = default
+
+    @staticmethod
+    def _snapshot(
+        record: dict[str, Any], provider: StorageProvider
+    ) -> StorageSnapshot:
+        return StorageSnapshot(
+            preset_id=record["preset_id"],
+            preset_key=record["preset_key"],
+            enabled=bool(record["enabled"]),
+            is_default=bool(record["is_default"]),
+            storage_config_id=record["id"],
+            revision=record["revision"],
+            provider_id=record["provider"],
+            provider_schema_version=record["provider_schema_version"],
+            provider=provider,
+        )
+
+    def _install_snapshot(
+        self, record: dict[str, Any], provider: StorageProvider
+    ) -> StorageSnapshot:
+        snapshot = self._snapshot(record, provider)
+        with self._active_lock:
+            self._providers_by_config_id[record["id"]] = provider
+            self._snapshots_by_key = self._snapshots_by_key | {
+                snapshot.preset_key: snapshot
+            }
+            if snapshot.is_default:
+                self._default_preset_key = snapshot.preset_key
+        return snapshot
 
     def provider_for_record(self, record: dict[str, Any]) -> StorageProvider:
+        with self._active_lock:
+            cached = self._providers_by_config_id.get(record["id"])
+        if cached is not None:
+            return cached
         provider_type = self.registry.get(
             record["provider"], record["provider_schema_version"]
         )
-        return provider_type(
+        provider = provider_type(
             json.loads(record["config_json"]),
             self.cipher.decrypt(record["credentials_ciphertext"]),
             self.settings,
         )
-
-    def active_snapshot(self) -> tuple[dict[str, Any], StorageProvider] | None:
         with self._active_lock:
-            if self._active_record is None or self._active_provider is None:
-                return None
-            return dict(self._active_record), self._active_provider
+            self._providers_by_config_id[record["id"]] = provider
+        return provider
+
+    def provider_for_config(self, config_id: str) -> StorageProvider:
+        with self._active_lock:
+            cached = self._providers_by_config_id.get(config_id)
+        if cached is not None:
+            return cached
+        record = self.database.storage_by_id(config_id)
+        if record is None:
+            raise ProviderError(
+                "RECOVERY_PENDING", "任务对应的存储配置不存在", uncertain=True
+            )
+        return self.provider_for_record(record)
+
+    def active_snapshot(self, preset_key: str | None = None) -> StorageSnapshot | None:
+        with self._active_lock:
+            key = preset_key if preset_key is not None else self._default_preset_key
+            return self._snapshots_by_key.get(key) if key is not None else None
+
+    def snapshots(self) -> dict[str, StorageSnapshot]:
+        with self._active_lock:
+            return dict(self._snapshots_by_key)
 
     async def _bootstrap_storage(self) -> None:
         if not self.settings.bootstrap_storage_from_env:
@@ -153,8 +226,8 @@ class Runtime:
         }
         await self.activate_storage(payload)
 
-    def current_storage(self) -> dict[str, Any]:
-        record = self.database.active_storage()
+    def current_storage(self, preset_key: str | None = None) -> dict[str, Any]:
+        record = self.database.active_storage(preset_key)
         if record is None:
             return {
                 "configured": False,
@@ -192,7 +265,11 @@ class Runtime:
         }
 
     def _candidate(
-        self, payload: dict[str, Any]
+        self,
+        payload: dict[str, Any],
+        preset_key: str | None = None,
+        *,
+        inherit_credentials: bool = True,
     ) -> tuple[str, int, dict, dict, StorageProvider]:
         if not isinstance(payload, dict):
             raise ProviderError("STORAGE_CONFIG_INVALID", "设置请求格式不合法")
@@ -206,7 +283,11 @@ class Runtime:
         if submitted is not None and not isinstance(submitted, dict):
             raise ProviderError("STORAGE_CONFIG_INVALID", "credentials 格式不合法")
         credentials = dict(submitted or {})
-        active = self.database.active_storage()
+        active = (
+            self.database.active_storage(preset_key)
+            if inherit_credentials
+            else None
+        )
         if active:
             old_config = json.loads(active["config_json"])
             same_identity = (
@@ -236,8 +317,12 @@ class Runtime:
             provider,
         )
 
-    async def test_storage(self, payload: dict[str, Any]) -> dict[str, Any]:
-        provider_id, schema_version, _, _, provider = self._candidate(payload)
+    async def test_storage(
+        self, payload: dict[str, Any], preset_key: str | None = None
+    ) -> dict[str, Any]:
+        provider_id, schema_version, _, _, provider = self._candidate(
+            payload, preset_key
+        )
         started = monotonic()
         latency = await anyio.to_thread.run_sync(provider.test_connection)
         return {
@@ -253,56 +338,142 @@ class Runtime:
             },
         }
 
-    async def activate_storage(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def create_storage_preset(
+        self, preset_key: str, display_name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        provider_id, schema_version, config, credentials, provider = self._candidate(
+            payload, inherit_credentials=False
+        )
+        latency = await anyio.to_thread.run_sync(provider.test_connection)
+        now = utc_now()
+        record = self.database.create_storage_preset(
+            {
+                "id": str(uuid4()),
+                "preset_key": preset_key,
+                "display_name": display_name,
+                "created_at": now,
+                "updated_at": now,
+            },
+            self._storage_record(
+                provider_id,
+                schema_version,
+                config,
+                credentials,
+                latency,
+                now,
+            ),
+        )
+        self._install_snapshot(record, provider)
+        self.log.emit(
+            NOTIFY,
+            "storage_preset_created",
+            "存储预设已创建",
+            details={"preset_key": preset_key, "provider": provider_id, "revision": 1},
+        )
+        return self.current_storage(preset_key)
+
+    def _storage_record(
+        self,
+        provider_id: str,
+        schema_version: int,
+        config: dict[str, Any],
+        credentials: dict[str, Any],
+        latency: int,
+        now: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": str(uuid4()),
+            "provider": provider_id,
+            "provider_schema_version": schema_version,
+            "config_json": json.dumps(
+                config, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
+            "credentials_ciphertext": self.cipher.encrypt(credentials),
+            "created_at": now,
+            "activated_at": now,
+            "last_tested_at": now,
+            "last_test_latency_ms": latency,
+        }
+
+    async def activate_storage(
+        self, payload: dict[str, Any], preset_key: str | None = None
+    ) -> dict[str, Any]:
         expected = payload.get("expected_revision")
         if not isinstance(expected, int) or expected < 0:
             raise ProviderError(
                 "STORAGE_CONFIG_INVALID", "expected_revision 不合法"
             )
-        active = self.database.active_storage()
+        active = self.database.active_storage(preset_key)
         current_revision = active["revision"] if active else 0
         if expected != current_revision:
             raise RevisionConflict(current_revision)
         provider_id, schema_version, config, credentials, provider = self._candidate(
-            payload
+            payload, preset_key
         )
         latency = await anyio.to_thread.run_sync(provider.test_connection)
         now = utc_now()
         record = self.database.activate_storage(
-            {
-                "id": str(uuid4()),
-                "provider": provider_id,
-                "provider_schema_version": schema_version,
-                "config_json": json.dumps(
-                    config, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-                ),
-                "credentials_ciphertext": self.cipher.encrypt(credentials),
-                "created_at": now,
-                "activated_at": now,
-                "last_tested_at": now,
-                "last_test_latency_ms": latency,
-            },
+            self._storage_record(
+                provider_id,
+                schema_version,
+                config,
+                credentials,
+                latency,
+                now,
+            ),
             expected,
+            preset_key,
         )
-        with self._active_lock:
-            self._active_record, self._active_provider = record, provider
-        self.last_probe = {
-            "status": "ok",
-            "last_checked_at": now,
-            "error_code": None,
-        }
+        snapshot = self._install_snapshot(record, provider)
+        if snapshot.is_default:
+            self.last_probe = {
+                "status": "ok",
+                "last_checked_at": now,
+                "error_code": None,
+            }
         self.log.emit(
             NOTIFY,
             "storage_config_activated",
             "存储配置已激活",
             details={
                 "provider": provider_id,
+                "preset_key": record["preset_key"],
                 "revision": record["revision"],
             },
         )
-        response = self.current_storage()
+        response = self.current_storage(record["preset_key"])
         response["previous_revision"] = expected
         return response
+
+    def update_storage_preset(
+        self,
+        preset_key: str,
+        expected_state_revision: int,
+        *,
+        display_name: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        preset = self.database.update_storage_preset(
+            preset_key,
+            expected_state_revision,
+            display_name=display_name,
+            enabled=enabled,
+        )
+        self._load_active()
+        return preset
+
+    async def set_default_storage_preset(
+        self,
+        preset_key: str,
+        expected_default_preset: str,
+        expected_state_revision: int,
+    ) -> dict[str, Any]:
+        preset = self.database.set_default_storage_preset(
+            preset_key, expected_default_preset, expected_state_revision
+        )
+        self._load_active()
+        await self.probe()
+        return preset
 
     async def probe(self) -> None:
         snapshot = self.active_snapshot()
@@ -314,7 +485,7 @@ class Runtime:
             }
             return
         try:
-            await anyio.to_thread.run_sync(snapshot[1].test_connection)
+            await anyio.to_thread.run_sync(snapshot.provider.test_connection)
         except ProviderError as exc:
             self.last_probe = {
                 "status": "error",
@@ -336,12 +507,7 @@ class Runtime:
         tasks = self.database.pending_tasks(stale)
         for task in tasks:
             try:
-                record = self.database.storage_by_id(task["storage_config_id"])
-                if record is None:
-                    raise ProviderError(
-                        "RECOVERY_PENDING", "任务对应的存储配置不存在", uncertain=True
-                    )
-                provider = self.provider_for_record(record)
+                provider = self.provider_for_config(task["storage_config_id"])
                 metadata = await anyio.to_thread.run_sync(
                     provider.head_object, task["object_key"]
                 )
@@ -424,11 +590,11 @@ class Runtime:
             "config": {
                 "status": "ok" if snapshot else "error",
                 "configured": snapshot is not None,
-                "provider": snapshot[0]["provider"] if snapshot else None,
-                "provider_schema_version": snapshot[0]["provider_schema_version"]
+                "provider": snapshot.provider_id if snapshot else None,
+                "provider_schema_version": snapshot.provider_schema_version
                 if snapshot
                 else None,
-                "revision": snapshot[0]["revision"] if snapshot else 0,
+                "revision": snapshot.revision if snapshot else 0,
             },
             "database": database,
             "temp_dir": {
