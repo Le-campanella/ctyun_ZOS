@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-第一版 MVP 已完成本地构建与自动验收。实现以 [PLAN.md](PLAN.md) v4 和 [API.md](API.md) v1 为准。
+第一版 MVP 已完成本地构建与自动验收。当前发布接口为 API v1、数据库 schema v1；[docs/PLAN.md](docs/PLAN.md) v6 和 [docs/API.md](docs/API.md) v3 是未发布目标。
 
 ## 已完成
 
@@ -41,7 +41,8 @@
 
 ## 进行中
 
-- 无。
+- 2026-07-31：根据外部 review 开始 v3 第一阶段；先冻结当前契约，再实施 schema v1→v2→v3 事务迁移。
+- 2026-07-31：为当前公开 JSON 接口增加 Pydantic request/response model 和 OpenAPI 契约基线。
 
 ## 尚未完成
 

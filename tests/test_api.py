@@ -145,6 +145,31 @@ def test_unconfigured_service_still_serves_health_settings_and_dashboard(client)
     assert upload.json()["error"]["code"] == "STORAGE_NOT_CONFIGURED"
 
 
+def test_openapi_and_upload_response_freeze_current_v1_contract(client):
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    assert "UploadResponseV1" in schemas
+    upload_schema = schemas["UploadResponseV1"]
+    assert set(upload_schema["required"]) == {"task_id", "key", "url"}
+    assert upload_schema["additionalProperties"] is False
+
+    activate(client)
+    response = client.post(
+        "/v1/uploads",
+        files={"file": ("contract.txt", b"contract", "text/plain")},
+    )
+    assert response.status_code == 201
+    assert set(response.json()) == {"task_id", "key", "url"}
+    serialized = response.text.lower()
+    for secret_name in (
+        "access_key",
+        "secret_key",
+        "settings_encryption_key",
+        "delete_token",
+        "token_hash",
+    ):
+        assert secret_name not in serialized
+
+
 def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     activate(client)
     dashboard = client.get("/dashboard")

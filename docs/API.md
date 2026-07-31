@@ -1,3 +1,10 @@
+---
+status: unreleased
+target_version: v3
+implementation_baseline: API v1
+implementation_status: partial
+---
+
 # 局域网轻量文件上传服务接口文档（ZOS v3）
 
 > 面向对象：局域网内调用本服务的其他服务、接入 Agent，以及包含监控与存储设置功能的 Dashboard。
@@ -5,6 +12,8 @@
 > 接口文档修订：`v3`（删除与多存储预设能力设计已确认，待实现）；HTTP 路径命名空间继续使用 `/v1`。
 >
 > 同步基线：`PLAN.md` v6
+>
+> **注意：本文是尚未发布的 v3 目标契约，不能作为当前生产接口契约。当前已实现行为以 README 的“当前发布基线”和服务 OpenAPI 为准。**
 
 ## 1. 能力范围
 

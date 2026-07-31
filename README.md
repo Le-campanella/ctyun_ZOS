@@ -2,7 +2,14 @@
 
 这是一个单容器、无登录的内部文件网关：接收局域网服务提交的单个文件，临时落盘后上传到当前激活的天翼云 ZOS Bucket，记录 SQLite 任务台账，并返回对象 Key 和公网 URL。请求结束后不保留文件本体。
 
-完整行为见 [PLAN.md](PLAN.md)，调用方契约见 [API.md](API.md)，实施记录见 [WORKLOG.md](WORKLOG.md)。
+## 当前发布基线
+
+- 当前 HTTP 契约：API v1，上传成功只返回 `task_id`、`key`、`url`。
+- 当前数据库：schema v1，单一 active Storage Config。
+- [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
+- 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
+
+实施记录见 [WORKLOG.md](WORKLOG.md)，外部审查与实施建议见 [docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md](docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md)。
 
 ## 启动
 

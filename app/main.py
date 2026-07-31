@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from contextlib import asynccontextmanager
@@ -24,6 +23,24 @@ from starlette.datastructures import UploadFile
 from .config import Settings
 from .database import Database, RevisionConflict, utc_now
 from .eventlog import NOTIFY
+from .models import (
+    DashboardLogsResponse,
+    DashboardStorageResponse,
+    DashboardSummaryResponse,
+    DashboardTrafficResponse,
+    HealthResponse,
+    ProviderSchemasResponse,
+    ReadyResponse,
+    ReceiveValidationResponse,
+    StorageCandidateRequest,
+    StorageSaveResponse,
+    StorageSettingsResponse,
+    StorageTestResponse,
+    StorageUpdateRequest,
+    TaskDetailResponse,
+    TaskListResponse,
+    UploadResponseV1,
+)
 from .providers import ProviderError, ProviderRegistry, default_registry
 from .runtime import Runtime
 
@@ -394,11 +411,11 @@ def create_app(
             status_code=500,
         )
 
-    @app.get("/healthz")
+    @app.get("/healthz", response_model=HealthResponse)
     async def health():
         return {"status": "ok"}
 
-    @app.get("/readyz")
+    @app.get("/readyz", response_model=ReadyResponse, response_model_exclude_none=True)
     async def ready(request: Request):
         runtime: Runtime = request.app.state.runtime
         is_ready, checks, code = runtime.ready_checks()
@@ -415,39 +432,39 @@ def create_app(
             }
         return JSONResponse(body, status_code=200 if is_ready else 503)
 
-    @app.get("/v1/settings/storage/providers")
+    @app.get(
+        "/v1/settings/storage/providers", response_model=ProviderSchemasResponse
+    )
     async def provider_schemas(request: Request):
         runtime: Runtime = request.app.state.runtime
         return {"items": runtime.registry.schemas()}
 
-    @app.get("/v1/settings/storage")
+    @app.get("/v1/settings/storage", response_model=StorageSettingsResponse)
     async def current_storage(request: Request):
         response = JSONResponse(request.app.state.runtime.current_storage())
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    @app.post("/v1/settings/storage/test")
-    async def test_storage(request: Request):
+    @app.post("/v1/settings/storage/test", response_model=StorageTestResponse)
+    async def test_storage(request: Request, payload: StorageCandidateRequest):
         _settings_request(request)
         try:
-            payload = await request.json()
-            result = await request.app.state.runtime.test_storage(payload)
-        except json.JSONDecodeError as exc:
-            raise APIError(400, "STORAGE_CONFIG_INVALID", "JSON 格式不合法") from exc
+            result = await request.app.state.runtime.test_storage(
+                payload.model_dump(exclude_none=True)
+            )
         except ProviderError as exc:
             raise APIError(_provider_status(exc), exc.code, exc.message) from exc
         response = JSONResponse(result)
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    @app.put("/v1/settings/storage")
-    async def save_storage(request: Request):
+    @app.put("/v1/settings/storage", response_model=StorageSaveResponse)
+    async def save_storage(request: Request, payload: StorageUpdateRequest):
         _settings_request(request)
         try:
-            payload = await request.json()
-            result = await request.app.state.runtime.activate_storage(payload)
-        except json.JSONDecodeError as exc:
-            raise APIError(400, "STORAGE_CONFIG_INVALID", "JSON 格式不合法") from exc
+            result = await request.app.state.runtime.activate_storage(
+                payload.model_dump(exclude_none=True)
+            )
         except ProviderError as exc:
             raise APIError(_provider_status(exc), exc.code, exc.message) from exc
         except RevisionConflict as exc:
@@ -460,7 +477,7 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    @app.post("/v1/uploads/validate")
+    @app.post("/v1/uploads/validate", response_model=ReceiveValidationResponse)
     async def validate_upload(request: Request):
         runtime: Runtime = request.app.state.runtime
         source = await _upload_file(request, runtime)
@@ -499,7 +516,7 @@ def create_app(
             spool.close()
             await source.close()
 
-    @app.post("/v1/uploads")
+    @app.post("/v1/uploads", response_model=UploadResponseV1)
     async def upload(request: Request):
         runtime: Runtime = request.app.state.runtime
         snapshot = runtime.active_snapshot()
@@ -696,7 +713,7 @@ def create_app(
             spool.close()
             await source.close()
 
-    @app.get("/v1/upload-tasks")
+    @app.get("/v1/upload-tasks", response_model=TaskListResponse)
     async def tasks(request: Request):
         try:
             limit = int(request.query_params.get("limit", "50"))
@@ -728,7 +745,7 @@ def create_app(
             "offset": offset,
         }
 
-    @app.get("/v1/upload-tasks/{task_id}")
+    @app.get("/v1/upload-tasks/{task_id}", response_model=TaskDetailResponse)
     async def task_detail(request: Request, task_id: str):
         try:
             UUID(task_id)
@@ -739,7 +756,7 @@ def create_app(
             raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
         return _task_item(task, detail=True)
 
-    @app.get("/v1/dashboard/summary")
+    @app.get("/v1/dashboard/summary", response_model=DashboardSummaryResponse)
     async def dashboard_summary(request: Request):
         from_time, to_time = _time_range(request)
         runtime: Runtime = request.app.state.runtime
@@ -756,7 +773,7 @@ def create_app(
             "uploads": uploads,
         }
 
-    @app.get("/v1/dashboard/traffic")
+    @app.get("/v1/dashboard/traffic", response_model=DashboardTrafficResponse)
     async def dashboard_traffic(request: Request):
         from_time, to_time = _time_range(request)
         interval = request.query_params.get("interval", "hour")
@@ -837,7 +854,7 @@ def create_app(
             "points": points,
         }
 
-    @app.get("/v1/dashboard/logs")
+    @app.get("/v1/dashboard/logs", response_model=DashboardLogsResponse)
     async def dashboard_logs(request: Request):
         level_name = request.query_params.get("min_level", "NOTIFY")
         if level_name not in LEVELS:
@@ -871,7 +888,7 @@ def create_app(
             "next_before_id": items[-1]["id"] if len(items) == limit else None,
         }
 
-    @app.get("/v1/dashboard/storage")
+    @app.get("/v1/dashboard/storage", response_model=DashboardStorageResponse)
     async def dashboard_storage(request: Request):
         from_time, to_time = _time_range(request)
         runtime: Runtime = request.app.state.runtime
