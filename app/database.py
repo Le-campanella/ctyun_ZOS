@@ -788,6 +788,10 @@ class Database:
             "version_id",
             "delete_token_hash",
             "object_status",
+            "delete_request_id",
+            "delete_error_code",
+            "delete_started_at",
+            "deleted_at",
             "error_code",
             "finished_at",
             "duration_ms",
@@ -800,6 +804,21 @@ class Database:
                 f"UPDATE upload_tasks SET {assignments} WHERE id=?",
                 (*changes.values(), task_id),
             )
+
+    def claim_task_deletion(
+        self, task_id: str, request_id: str, started_at: str
+    ) -> bool:
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE upload_tasks
+                SET object_status='deleting', delete_request_id=?,
+                    delete_error_code=NULL, delete_started_at=?, deleted_at=NULL
+                WHERE id=? AND status='succeeded' AND object_status='present'
+                """,
+                (request_id, started_at, task_id),
+            )
+            return cursor.rowcount == 1
 
     def task_by_id(self, task_id: str) -> dict[str, Any] | None:
         with closing(self.connect()) as connection:

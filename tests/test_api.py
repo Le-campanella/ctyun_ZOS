@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 import re
+import sqlite3
 from threading import Event
 from typing import BinaryIO
 from uuid import uuid4
@@ -29,10 +30,16 @@ class FakeProvider(StorageProvider):
     objects: dict[str, bytes] = {}
     upload_started = Event()
     upload_release = Event()
+    delete_started = Event()
+    delete_release = Event()
+    delete_requests: list[tuple[str, str | None]] = []
+    etags: dict[str, str] = {}
+    version_ids: dict[str, str | None] = {}
 
     def __init__(self, config, credentials, _settings):
         self.config, self.credentials = self.validate(config, credentials)
         self.fail_upload = self.config.get("fail_upload", False)
+        self.delete_calls: list[tuple[str, str | None]] = []
         self.__class__.instances.append(self)
 
     @classmethod
@@ -82,11 +89,31 @@ class FakeProvider(StorageProvider):
             return None
         return ObjectMetadata(
             size_bytes=len(value) + self.config.get("head_size_delta", 0),
-            etag=None if self.config.get("head_missing_etag") else '"fake-etag"',
-            version_id=version_id or self.config.get("version_id"),
+            etag=None
+            if self.config.get("head_missing_etag")
+            else self.__class__.etags.get(object_key, '"fake-etag"'),
+            version_id=self.__class__.version_ids.get(
+                object_key, version_id or self.config.get("version_id")
+            ),
             content_type="application/octet-stream",
             last_modified="2026-07-31T00:00:00Z",
         )
+
+    def delete_object(
+        self, object_key: str, version_id: str | None = None
+    ) -> None:
+        self.delete_calls.append((object_key, version_id))
+        self.__class__.delete_requests.append((object_key, version_id))
+        if self.config.get("block_delete"):
+            self.__class__.delete_started.set()
+            self.__class__.delete_release.wait(3)
+        if self.config.get("fail_delete"):
+            raise ProviderError("DELETE_FAILED", "failed")
+        if self.config.get("uncertain_delete"):
+            if self.config.get("delete_before_timeout"):
+                self.__class__.objects.pop(object_key, None)
+            raise ProviderError("DELETE_PENDING", "pending", uncertain=True)
+        self.__class__.objects.pop(object_key, None)
 
     def build_public_url(self, object_key: str) -> str:
         return f"{self.config['public_base_url'].rstrip('/')}/{object_key}"
@@ -101,6 +128,11 @@ def registry():
     FakeProvider.objects.clear()
     FakeProvider.upload_started.clear()
     FakeProvider.upload_release.clear()
+    FakeProvider.delete_started.clear()
+    FakeProvider.delete_release.clear()
+    FakeProvider.delete_requests.clear()
+    FakeProvider.etags.clear()
+    FakeProvider.version_ids.clear()
     registry = ProviderRegistry()
     registry.register(FakeProvider)
     return registry
@@ -735,6 +767,218 @@ def test_idempotent_success_replay_does_not_upload_twice(client):
     assert first.json()["delete_token"] is not None
     assert second.json() == first.json() | {"delete_token": None}
     assert len(FakeProvider.objects) == 1
+
+
+def test_verified_delete_is_version_exact_and_idempotent(client):
+    activate(client, version_id="version-1")
+    upload = client.post(
+        "/v1/uploads", files={"file": ("delete.txt", b"delete-me")}
+    ).json()
+    runtime = client.app.state.runtime
+    task = runtime.database.task_by_id(upload["task_id"])
+    original_provider = runtime.provider_for_config(task["storage_config_id"])
+    activate(
+        client,
+        revision=1,
+        credentials=False,
+        public_base_url="https://new-revision.example",
+        version_id="version-1",
+    )
+    headers = {"X-Delete-Token": upload["delete_token"]}
+
+    deleted = client.delete(
+        f"/v1/upload-tasks/{upload['task_id']}/object", headers=headers
+    )
+    repeated = client.delete(
+        f"/v1/upload-tasks/{upload['task_id']}/object", headers=headers
+    )
+
+    assert deleted.status_code == repeated.status_code == 200
+    assert deleted.json()["object_status"] == "deleted"
+    assert deleted.json()["already_deleted"] is False
+    assert deleted.json()["already_absent"] is False
+    assert repeated.json()["already_deleted"] is True
+    assert len(FakeProvider.delete_requests) == 1
+    assert FakeProvider.delete_requests[0] == (upload["key"], "version-1")
+    assert original_provider.delete_calls == [(upload["key"], "version-1")]
+    assert runtime.active_snapshot().provider.delete_calls == []
+    detail = client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
+    assert detail["object_status"] == "deleted"
+    assert detail["deleted_at"] == deleted.json()["deleted_at"]
+    assert detail["delete_error_code"] is None
+    assert detail["delete_started_at"] is not None
+    assert upload["delete_token"] not in client.get("/v1/upload-tasks").text
+    assert upload["delete_token"] not in client.get("/dashboard").text
+
+
+def test_delete_rejects_invalid_capability_body_and_legacy_task(client):
+    activate(client)
+    first = client.post(
+        "/v1/uploads", files={"file": ("first.txt", b"first")}
+    ).json()
+    second = client.post(
+        "/v1/uploads", files={"file": ("second.txt", b"second")}
+    ).json()
+    path = f"/v1/upload-tasks/{first['task_id']}/object"
+
+    assert client.delete(path).status_code == 403
+    assert (
+        client.delete(path, headers={"X-Delete-Token": "x" * 257})
+        .json()["error"]["code"]
+        == "DELETE_TOKEN_INVALID"
+    )
+    assert (
+        client.delete(path, headers={"X-Delete-Token": "tampered"})
+        .json()["error"]["code"]
+        == "DELETE_TOKEN_INVALID"
+    )
+    assert (
+        client.delete(path, headers={"X-Delete-Token": second["delete_token"]})
+        .json()["error"]["code"]
+        == "DELETE_TOKEN_INVALID"
+    )
+    body = client.request(
+        "DELETE",
+        path,
+        headers={"X-Delete-Token": first["delete_token"]},
+        content=b"{}",
+    )
+    assert body.status_code == 400
+    assert body.json()["error"]["code"] == "BAD_REQUEST"
+    assert FakeProvider.delete_requests == []
+
+    client.app.state.runtime.database.update_task(
+        first["task_id"], object_status="legacy_unverified"
+    )
+    legacy = client.delete(
+        path, headers={"X-Delete-Token": first["delete_token"]}
+    )
+    assert legacy.status_code == 409
+    assert legacy.json()["error"]["code"] == "OBJECT_NOT_DELETABLE"
+    missing = client.delete(
+        f"/v1/upload-tasks/{uuid4()}/object",
+        headers={"X-Delete-Token": first["delete_token"]},
+    )
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "TASK_NOT_FOUND"
+
+
+@pytest.mark.parametrize("change", ["size", "etag", "version"])
+def test_delete_refuses_changed_remote_object(client, change):
+    activate(client, version_id="version-1")
+    upload = client.post(
+        "/v1/uploads", files={"file": ("changed.txt", b"original")}
+    ).json()
+    if change == "size":
+        FakeProvider.objects[upload["key"]] += b"x"
+    elif change == "etag":
+        FakeProvider.etags[upload["key"]] = '"changed-etag"'
+    else:
+        FakeProvider.version_ids[upload["key"]] = "version-2"
+
+    response = client.delete(
+        f"/v1/upload-tasks/{upload['task_id']}/object",
+        headers={"X-Delete-Token": upload["delete_token"]},
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "OBJECT_CHANGED"
+    assert FakeProvider.delete_requests == []
+    task = client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
+    assert task["object_status"] == "present"
+    assert task["delete_error_code"] == "OBJECT_CHANGED"
+
+
+def test_delete_marks_preexisting_absence_without_provider_delete(client):
+    activate(client)
+    upload = client.post(
+        "/v1/uploads", files={"file": ("absent.txt", b"gone")}
+    ).json()
+    FakeProvider.objects.pop(upload["key"])
+
+    response = client.delete(
+        f"/v1/upload-tasks/{upload['task_id']}/object",
+        headers={"X-Delete-Token": upload["delete_token"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["already_absent"] is True
+    assert response.json()["already_deleted"] is False
+    assert FakeProvider.delete_requests == []
+
+
+@pytest.mark.parametrize(
+    ("config", "status", "code", "object_status"),
+    [
+        ({"fail_delete": True}, 502, "DELETE_FAILED", "present"),
+        (
+            {"uncertain_delete": True, "delete_before_timeout": True},
+            202,
+            "DELETE_PENDING",
+            "delete_unknown",
+        ),
+    ],
+)
+def test_delete_provider_failure_is_never_reported_as_success(
+    client, config, status, code, object_status
+):
+    activate(client, **config)
+    upload = client.post(
+        "/v1/uploads", files={"file": ("failure.txt", b"payload")}
+    ).json()
+    response = client.delete(
+        f"/v1/upload-tasks/{upload['task_id']}/object",
+        headers={"X-Delete-Token": upload["delete_token"]},
+    )
+
+    assert response.status_code == status
+    assert response.json()["error"]["code"] == code
+    task = client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
+    assert task["object_status"] == object_status
+    assert task["delete_error_code"] == code
+
+
+def test_concurrent_delete_has_one_provider_caller(client):
+    activate(client, block_delete=True)
+    upload = client.post(
+        "/v1/uploads", files={"file": ("concurrent.txt", b"payload")}
+    ).json()
+    path = f"/v1/upload-tasks/{upload['task_id']}/object"
+    headers = {"X-Delete-Token": upload["delete_token"]}
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(client.delete, path, headers=headers)
+        assert FakeProvider.delete_started.wait(2)
+        second = client.delete(path, headers=headers)
+        FakeProvider.delete_release.set()
+        first_response = first.result(timeout=3)
+
+    assert first_response.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "DELETE_IN_PROGRESS"
+    assert len(FakeProvider.delete_requests) == 1
+
+
+def test_delete_database_failure_does_not_claim_success(client, monkeypatch):
+    activate(client)
+    upload = client.post(
+        "/v1/uploads", files={"file": ("db.txt", b"payload")}
+    ).json()
+    database = client.app.state.runtime.database
+    original = database.update_task
+
+    def fail_final_update(task_id, **changes):
+        if changes.get("object_status") == "deleted":
+            raise sqlite3.OperationalError("disk full")
+        return original(task_id, **changes)
+
+    monkeypatch.setattr(database, "update_task", fail_final_update)
+    response = client.delete(
+        f"/v1/upload-tasks/{upload['task_id']}/object",
+        headers={"X-Delete-Token": upload["delete_token"]},
+    )
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "DATABASE_ERROR"
+    assert upload["key"] not in FakeProvider.objects
+    assert database.task_by_id(upload["task_id"])["object_status"] == "deleting"
 
 
 def test_empty_oversized_multiple_files_and_failed_idempotency(client):

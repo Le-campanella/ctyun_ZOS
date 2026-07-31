@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v3，上传对象元数据确认、一次性删除凭证、多预设 Runtime、管理 API 和显式上传路由已经实现，但 DELETE API 尚未发布。[docs/PLAN.md](docs/PLAN.md) v6 和 [docs/API.md](docs/API.md) v3 的其余能力仍是未发布目标。
+第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v3，上传对象元数据确认、一次性删除凭证、多预设 Runtime、管理 API、显式上传路由和严格 DELETE API 已经实现。删除恢复、完整审计和 Dashboard v3 仍是未发布目标。
 
 ## 已完成
 
@@ -62,14 +62,18 @@
 - 2026-07-31：幂等键绑定首次任务的预设；默认切换或原预设禁用后仍可重放，显式改用其他预设返回 `IDEMPOTENCY_SCOPE_MISMATCH`。
 - 2026-07-31：任务列表与详情返回 `storage_preset`；上传开始和成功日志记录预设 key。
 - 2026-07-31：完成预设路由、失败不回退、幂等范围、禁用后重放和在途配置 revision 冻结测试；共 45 个自动测试通过。
+- 2026-07-31：开放 `DELETE /v1/upload-tasks/{task_id}/object`；删除凭证使用 SHA-256 和常量时间比较，缺失、篡改及跨任务 token 均拒绝。
+- 2026-07-31：删除通过 SQLite 条件更新抢占 `present → deleting`，使用任务原 `storage_config_id`，删除前后执行 HeadObject，并校验大小、ETag 和可选 VersionId。
+- 2026-07-31：支持精确版本删除、已删除幂等响应、删除前已不存在、Provider 明确失败和 `202 DELETE_PENDING`；任务查询增加删除状态字段。
+- 2026-07-31：完成 token、请求体、历史任务、元数据变化、旧配置 revision、并发删除、Provider 超时和数据库落盘失败测试；共 55 个自动测试通过。
 
 ## 尚未完成
 
 - 多预设 Dashboard。
-- DELETE API、严格删除、删除恢复与审计。
+- 删除不确定结果的启动/周期恢复与完整审计事件。
 - 完成接近 200 MiB、multipart、重启恢复等剩余真实 ZOS 压力与故障验收；基础 PDF 上传和公网访问已经通过。
 - 在目标局域网部署内网 HTTPS 反向代理、网络访问控制、数据库备份和 Bucket 生命周期规则；这些属于部署环境工作。
 
 ## 下一步
 
-进入下一提交：实现严格 DELETE API、对象身份校验、删除状态持久化和不确定结果恢复。
+进入下一提交：恢复 `delete_unknown` 和陈旧 `deleting` 任务，并补齐删除审计事件。

@@ -20,7 +20,12 @@ from app.database import (
 )
 from app.eventlog import EventLogger, NOTIFY
 from app.providers import CtyunZosProvider, ObjectMetadata, ProviderError
-from app.security import CredentialCipher, hash_delete_token, issue_delete_token
+from app.security import (
+    CredentialCipher,
+    hash_delete_token,
+    issue_delete_token,
+    matches_delete_token,
+)
 
 
 def storage_record(ciphertext: bytes, *, item_id: str | None = None) -> dict:
@@ -79,6 +84,9 @@ def test_delete_tokens_have_256_bits_and_only_hashes_need_persisting():
     assert first_hash == hash_delete_token(first)
     assert second_hash == hash_delete_token(second)
     assert first.encode() not in first_hash
+    assert matches_delete_token(first, first_hash)
+    assert not matches_delete_token(second, first_hash)
+    assert not matches_delete_token(None, first_hash)
 
 
 def test_database_schema_activation_and_revision_conflict(database: Database, settings):
@@ -318,6 +326,7 @@ class FakeS3:
         self.uploaded = None
         self.objects = {}
         self.last_head_request = None
+        self.last_delete_request = None
 
     def head_bucket(self, **_kwargs):
         return {}
@@ -346,6 +355,10 @@ class FakeS3:
             "ContentType": "application/pdf",
             "LastModified": datetime(2026, 7, 31, tzinfo=UTC),
         }
+
+    def delete_object(self, **request):
+        self.last_delete_request = request
+        self.objects.pop(request["Key"], None)
 
 
 def valid_config() -> dict:
@@ -389,6 +402,12 @@ def test_zos_provider_validation_upload_url_and_head(settings):
         last_modified="2026-07-31T00:00:00+00:00",
     )
     assert fake.last_head_request["VersionId"] == "version-1"
+    provider.delete_object("2026/07/29/a b.pdf", "version-1")
+    assert fake.last_delete_request == {
+        "Bucket": "bucket-1",
+        "Key": "2026/07/29/a b.pdf",
+        "VersionId": "version-1",
+    }
     assert provider.head_object("missing") is None
 
 

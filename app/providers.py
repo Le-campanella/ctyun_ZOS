@@ -13,6 +13,7 @@ from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import (
     ClientError,
+    ConnectionClosedError,
     ConnectTimeoutError,
     EndpointConnectionError,
     ReadTimeoutError,
@@ -88,6 +89,11 @@ class StorageProvider(ABC):
     def head_object(
         self, object_key: str, version_id: str | None = None
     ) -> ObjectMetadata | None: ...
+
+    @abstractmethod
+    def delete_object(
+        self, object_key: str, version_id: str | None = None
+    ) -> None: ...
 
     @abstractmethod
     def build_public_url(self, object_key: str) -> str: ...
@@ -388,6 +394,36 @@ class CtyunZosProvider(StorageProvider):
         except Exception as exc:
             raise ProviderError(
                 "UPLOAD_CONFIRMATION_FAILED", "暂时无法确认远端对象", uncertain=True
+            ) from exc
+
+    def delete_object(
+        self, object_key: str, version_id: str | None = None
+    ) -> None:
+        request = {"Bucket": self.bucket, "Key": object_key}
+        if version_id is not None:
+            request["VersionId"] = version_id
+        try:
+            self.client.delete_object(**request)
+        except (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            ReadTimeoutError,
+            EndpointConnectionError,
+            socket.gaierror,
+        ) as exc:
+            raise ProviderError(
+                "DELETE_PENDING", "删除结果暂时无法确认", uncertain=True
+            ) from exc
+        except ClientError as exc:
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if isinstance(status, int) and status >= 500:
+                raise ProviderError(
+                    "DELETE_PENDING", "删除结果暂时无法确认", uncertain=True
+                ) from exc
+            raise ProviderError("DELETE_FAILED", "Storage Provider 拒绝删除") from exc
+        except Exception as exc:
+            raise ProviderError(
+                "DELETE_PENDING", "删除结果暂时无法确认", uncertain=True
             ) from exc
 
     def build_public_url(self, object_key: str) -> str:

@@ -198,6 +198,9 @@ class TaskItemResponse(ContractModel):
     etag: str | None
     version_id: str | None
     object_status: str
+    delete_error_code: str | None
+    delete_started_at: str | None
+    deleted_at: str | None
     error_code: str | None
     created_at: str
     finished_at: str | None
@@ -212,6 +215,15 @@ class TaskListResponse(ContractModel):
     items: list[TaskItemResponse]
     limit: int
     offset: int
+
+
+class DeleteObjectResponse(ContractModel):
+    task_id: str
+    key: str
+    object_status: Literal["deleted"]
+    deleted_at: str
+    already_deleted: bool
+    already_absent: bool
 
 
 class DashboardSummaryResponse(ContractModel):

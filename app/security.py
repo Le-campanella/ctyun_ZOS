@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from hmac import compare_digest
 from hashlib import sha256
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -14,6 +15,17 @@ def hash_delete_token(token: str) -> bytes:
 def issue_delete_token() -> tuple[str, bytes]:
     token = secrets.token_urlsafe(32)
     return token, hash_delete_token(token)
+
+
+def matches_delete_token(token: str | None, expected_hash: bytes | None) -> bool:
+    if (
+        token is None
+        or expected_hash is None
+        or not 1 <= len(token) <= 256
+        or any(ord(char) < 33 or ord(char) > 126 for char in token)
+    ):
+        return False
+    return compare_digest(hash_delete_token(token), expected_hash)
 
 
 class CredentialCipher:

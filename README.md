@@ -7,6 +7,7 @@
 - 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
 - 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
 - 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API。上传接口可通过 `X-Storage-Preset` 选择已启用预设，未传时使用默认项。
+- `DELETE /v1/upload-tasks/{task_id}/object` 已开放严格删除：只接受任务级 `X-Delete-Token`，使用任务原配置校验对象元数据、精确删除 VersionId 并再次确认对象不存在。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 
@@ -91,7 +92,17 @@ curl -fsS \
 }
 ```
 
-单文件最大 200 MiB，默认接受所有类型。正式上传固定设置 `public-read` 对象 ACL；公网 URL 只在上传成功时返回，服务不代理下载。数据库只保存 `delete_token` 的 SHA-256，调用方需要自行安全保存明文；首次 `201` 丢失后无法补发。当前版本尚未开放 DELETE API。
+单文件最大 200 MiB，默认接受所有类型。正式上传固定设置 `public-read` 对象 ACL；公网 URL 只在上传成功时返回，服务不代理下载。数据库只保存 `delete_token` 的 SHA-256，调用方需要自行安全保存明文；首次 `201` 丢失后无法补发。
+
+严格删除：
+
+```bash
+curl -fsS -X DELETE \
+  -H 'X-Delete-Token: <首次上传响应中的 delete_token>' \
+  http://<内网IP>:8000/v1/upload-tasks/<task_id>/object
+```
+
+删除请求不能提交 Bucket、Key、URL 或 VersionId。服务只使用任务绑定的原存储配置和对象元数据定位目标；预设禁用、默认切换或新增 revision 不改变删除目标。`202 DELETE_PENDING` 表示结果未知，不是删除成功；当前阶段尚未实现该状态的后台恢复。
 
 ## 测试
 
@@ -102,7 +113,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖多预设路由和在途快照、上传成功/失败/待确认、HeadObject 缺失/超时/大小不一致、元数据持久化、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
+测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果和数据库失败，以及多预设路由和在途快照、上传、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
 
 ## 部署到局域网服务器
 
