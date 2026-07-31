@@ -14,8 +14,8 @@
 请先完整阅读以下文件，再修改代码：
 
 ```text
-PLAN.md
-API.md
+docs/PLAN.md
+docs/API.md
 README.md
 WORKLOG.md
 app/config.py

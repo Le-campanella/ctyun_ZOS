@@ -118,6 +118,34 @@ def test_idempotency_index_is_unique(database: Database):
         database.create_task(second)
 
 
+def test_retention_never_removes_a_task_that_may_still_have_an_object(
+    database: Database,
+):
+    config = database.activate_storage(storage_record(b"ciphertext"), 0)
+    present = task_record(
+        config["id"], created_at="2020-01-01T00:00:00Z", status="succeeded"
+    )
+    absent = task_record(
+        config["id"], created_at="2020-01-01T00:00:00Z", status="failed"
+    )
+    database.create_task(present)
+    database.create_task(absent)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE upload_tasks SET object_status='present' WHERE id=?",
+            (present["id"],),
+        )
+        connection.execute(
+            "UPDATE upload_tasks SET object_status='absent' WHERE id=?",
+            (absent["id"],),
+        )
+
+    database.maintain(task_retention_days=1, log_retention_days=1, log_max_rows=10)
+
+    assert database.task_by_id(present["id"]) is not None
+    assert database.task_by_id(absent["id"]) is None
+
+
 def test_event_logger_redacts_secrets_and_persists_notify(database: Database, capsys):
     logger = EventLogger(database)
     logger.emit(
@@ -188,6 +216,10 @@ def test_summary_percentile_log_pagination_and_retention(database: Database):
             min_level=NOTIFY, limit=10, filters={"request_id": "keep"}
         )
     ) == 2
+    with pytest.raises(ValueError, match="invalid log filter"):
+        database.list_logs(
+            min_level=NOTIFY, limit=10, filters={"unsafe_column": "value"}
+        )
     database.maintain(task_retention_days=180, log_retention_days=30, log_max_rows=3)
     assert len(database.list_logs(min_level=NOTIFY, limit=10)) == 3
 

@@ -5,7 +5,7 @@
 ## 当前发布基线
 
 - 当前 HTTP 契约：API v1，上传成功只返回 `task_id`、`key`、`url`。
-- 当前数据库：schema v1，单一 active Storage Config。
+- 当前仓库数据库：schema v3；运行行为仍使用自动创建或迁移的 `default` 预设，尚未开放多预设 API。
 - [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 是未发布目标，不代表当前生产行为。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 
@@ -37,6 +37,18 @@ docker compose ps
 - 就绪检查：`http://<内网IP>:8000/readyz`
 
 服务未配置 ZOS 时仍可访问 Dashboard 和设置页，`/readyz` 与上传接口会返回 `STORAGE_NOT_CONFIGURED`。在设置页填写 SDK Endpoint、Bucket、公网访问根地址及 AK/SK，先测试连接，再保存激活。
+
+## 数据库升级
+
+服务启动时使用 `PRAGMA user_version` 检测数据库版本：
+
+- 空数据库直接创建 schema v3。
+- schema v1 依次事务升级到 v2、v3。
+- schema v2 事务升级到 v3。
+- 升级前使用 SQLite Online Backup 在数据库旁创建 `zos-upload.db.pre-v3-<timestamp>`，包括 WAL 中已提交数据。
+- 升级后执行 `integrity_check`、外键、默认预设、active revision 和引用完整性检查；失败时停止启动。
+
+schema v3 保留原 task ID、storage config ID 和 revision。历史成功任务标记为 `legacy_unverified`，不会获得删除凭证。不要让旧镜像直接打开已经升级的数据库；需要回滚旧镜像时，必须同时恢复升级前备份。
 
 ## 调用上传接口
 
@@ -80,7 +92,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖上传成功/失败/待确认、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite WAL 与 revision、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
+测试覆盖上传成功/失败/待确认、空文件与超限文件、伪造请求长度、幂等、并发上限、恢复、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、日志、Dashboard 与设置接口。
 
 ## 部署到局域网服务器
 

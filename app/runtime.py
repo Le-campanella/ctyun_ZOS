@@ -48,8 +48,20 @@ class Runtime:
 
     async def start(self, background: bool = True) -> None:
         self.settings.temp_dir.mkdir(parents=True, exist_ok=True)
-        self.database.initialize()
+        migration_backup = self.database.initialize()
         self.schema_ready = True
+        self.log.emit(
+            NOTIFY,
+            "database_schema_ready",
+            "数据库 schema 已就绪",
+            details={
+                "schema_version": 3,
+                "migration_backup_created": migration_backup is not None,
+                "migration_backup_name": migration_backup.name
+                if migration_backup
+                else None,
+            },
+        )
         await self._bootstrap_storage()
         self._load_active()
         await self.recover()

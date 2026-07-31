@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-第一版 MVP 已完成本地构建与自动验收。当前发布接口为 API v1、数据库 schema v1；[docs/PLAN.md](docs/PLAN.md) v6 和 [docs/API.md](docs/API.md) v3 是未发布目标。
+第一版 MVP 已完成本地构建与自动验收。当前发布接口仍为 API v1；仓库数据库已升级为 schema v3，但多预设路由与严格删除尚未发布。[docs/PLAN.md](docs/PLAN.md) v6 和 [docs/API.md](docs/API.md) v3 仍是未发布目标。
 
 ## 已完成
 
@@ -43,12 +43,18 @@
 
 - 2026-07-31：根据外部 review 开始 v3 第一阶段；先冻结当前契约，再实施 schema v1→v2→v3 事务迁移。
 - 2026-07-31：为当前公开 JSON 接口增加 Pydantic request/response model 和 OpenAPI 契约基线。
+- 2026-07-31：完成 schema v3、逐版本事务迁移、SQLite Online Backup、完整性验证和默认预设兼容层。
+- 2026-07-31：完成空库、v1、v2、重复启动、数据保持、迁移故障回滚和安全保留策略测试；共 34 个自动测试通过。
+- 2026-07-31：使用远程生产 schema v1 的 SQLite Online Backup 副本完成离线演练；1 个配置、21 个任务、7 条日志全部保留，config/task ID 与 revision 保持，`integrity_check=ok` 且无外键问题。远程生产数据库未修改。
 
 ## 尚未完成
 
+- 上传成功后的 HeadObject 元数据确认、ETag、VersionId 和对象状态持久化。
+- 多预设 Runtime、设置 API、`X-Storage-Preset` 路由和 Dashboard。
+- delete token、严格删除、删除恢复与审计。
 - 完成接近 200 MiB、multipart、重启恢复等剩余真实 ZOS 压力与故障验收；基础 PDF 上传和公网访问已经通过。
 - 在目标局域网部署内网 HTTPS 反向代理、网络访问控制、数据库备份和 Bucket 生命周期规则；这些属于部署环境工作。
 
 ## 下一步
 
-按 [README.md](README.md) 在目标主机启动服务，通过设置页激活真实 ZOS 配置，再执行真实对象与公网 URL 验收清单。
+进入 v3 第二阶段：先实现上传后的 HeadObject 元数据确认，再实现多预设 Runtime；完成对应测试和审查后才部署 schema v3。

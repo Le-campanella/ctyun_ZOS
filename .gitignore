@@ -13,3 +13,6 @@ assets/
 *.db
 *.db-shm
 *.db-wal
+*.db.pre-v3-*
+*.sqlite.pre-v3-*
+*.sqlite3.pre-v3-*
