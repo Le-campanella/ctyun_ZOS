@@ -141,10 +141,15 @@ cp .deploy.env.example .deploy.env
 ./deploy.sh
 ```
 
-脚本只部署已提交代码。部署前运行完整测试和生产镜像构建，使用 SQLite Online Backup
-保存远程数据库并记录 schema；部署后依次检查 `/healthz` 和 `/readyz`。检查失败时回滚
-旧镜像；跨 schema 升级还会恢复迁移前数据库，备份继续保留在数据库卷的
-`deploy-backups/` 目录。
+脚本只部署已提交代码。远程 `flock` 防止并发发布；已有服务先按
+`DEPLOY_DRAIN_SECONDS` 优雅停服，再生成并校验 SQLite 快照。新镜像先以不映射端口的候选
+容器检查 `/healthz` 和 `/readyz`，通过后重建正式服务并检查局域网入口。任一步失败都会
+恢复旧镜像和发布前数据库，同 schema 也一样；首次发布失败会清理不健康服务。
+
+`deploy-backups/` 默认分别保留最近 10 份普通发布快照、3 份跨 schema 快照，并受 1 GiB
+总容量限制；最新快照和最新跨 schema 快照不会因容量限制被删除。可在 `.deploy.env` 中
+调整 `DEPLOY_BACKUP_KEEP_RELEASES`、`DEPLOY_BACKUP_KEEP_MIGRATIONS` 和
+`DEPLOY_BACKUP_MAX_BYTES`。
 
 部署不会覆盖服务器 `.env`，也不会删除 `ctyun_zos` 项目的数据库和临时文件卷。
 
@@ -194,11 +199,25 @@ chmod 600 .backup.env
 ./scripts/zos-backup.sh verify <create 返回的 object_key>
 ```
 
+`BACKUP_MAX_DATABASE_BYTES` 和 `BACKUP_MAX_BLOB_BYTES` 会在全量内存加密或解密前执行大小
+与可用内存预检。定时任务使用 `create-verify`，每次上传后立即重新下载并完成受控校验。
+
 恢复演练会导出数据库和密钥，但不会覆盖运行中的数据库：
 
 ```bash
 ./scripts/zos-backup.sh restore <object_key> ./restore-drill
 ```
+
+`verify/restore` 不依赖正在运行的上传服务。在新 Linux 主机准备 Docker、此仓库和权限为
+`600` 的 `.backup.env` 后，可以固定使用已验证的工具镜像：
+
+```bash
+BACKUP_IMAGE=zos-upload-service:<已验证标签或摘要> \
+  ./scripts/zos-backup.sh restore <object_key> ./restore-drill
+```
+
+未提供 `BACKUP_IMAGE` 且没有运行容器时，脚本会从当前 checkout 构建本地 runtime 工具
+镜像。生产恢复优先使用已记录摘要的镜像，避免源码版本与备份格式不匹配。
 
 输出目录必须不存在；目录权限为 `700`，数据库和密钥文件权限为 `600`。验证首次手动
 备份后，安装每天 02:17 执行的用户 crontab：
@@ -207,7 +226,12 @@ chmod 600 .backup.env
 ./scripts/install-backup-cron.sh
 ```
 
-备份脚本不删除对象。版本保留、30 天合规保留和过期清理由私有 Bucket 策略负责。
+备份脚本不删除对象。版本保留、30 天合规保留和过期清理由私有 Bucket 策略负责。备份
+Bucket 必须保持私有：关闭匿名读写，若平台支持则启用 Block Public Access，并让 Bucket
+Policy 只授权备份账号所需的 PutObject、HeadObject、GetObject 和 ListBucket。首次配置及
+策略变更后，从无凭证网络对一个真实备份对象执行 `curl -I <对象URL>`，结果必须是
+`403` 或不泄露对象存在性的 `404`，不得是 `200`；随后再运行凭证化 `verify`。匿名验收
+失败时不要继续安装定时任务。
 
 ## 运维边界
 

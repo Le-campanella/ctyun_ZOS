@@ -5,7 +5,14 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.backup import BackupError, build_backup, create, verify, verify_backup
+from app.backup import (
+    BackupError,
+    build_backup,
+    create,
+    create_and_verify,
+    verify,
+    verify_backup,
+)
 
 
 class FakeStorage:
@@ -28,6 +35,7 @@ class FakeStorage:
         return {
             "Body": io.BytesIO(item["body"]),
             "Metadata": item["metadata"],
+            "ContentLength": len(item["body"]),
         }
 
 
@@ -79,9 +87,12 @@ def test_private_encrypted_backup_round_trip(settings, database, tmp_path):
             restore_directory=restore_directory,
         )
 
+    checked = create_and_verify(environment(settings), storage)
+    assert checked["verified"] == "ok"
+
 
 def test_backup_rejects_wrong_password_tampering_and_insecure_endpoint(
-    settings, database
+    settings, database, monkeypatch
 ):
     blob, _ = build_backup(
         settings.database_path,
@@ -99,3 +110,19 @@ def test_backup_rejects_wrong_password_tampering_and_insecure_endpoint(
     insecure["BACKUP_ZOS_ENDPOINT"] = "http://backup.example.com"
     with pytest.raises(BackupError, match="HTTPS"):
         create(insecure, FakeStorage())
+
+    with pytest.raises(BackupError, match="配置上限"):
+        build_backup(
+            settings.database_path,
+            settings.encryption_key,
+            "correct-passphrase-" * 3,
+            max_database_bytes=1,
+        )
+
+    monkeypatch.setattr("app.backup._available_memory_bytes", lambda: 1)
+    with pytest.raises(BackupError, match="可用内存不足"):
+        build_backup(
+            settings.database_path,
+            settings.encryption_key,
+            "correct-passphrase-" * 3,
+        )

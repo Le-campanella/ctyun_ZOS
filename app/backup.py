@@ -26,6 +26,9 @@ from cryptography.fernet import Fernet, InvalidToken
 MAGIC = b"ZOSBACKUP1"
 SALT_BYTES = 16
 ARCHIVE_FILES = {"database.sqlite3", "manifest.json", "settings_encryption_key.txt"}
+DEFAULT_MAX_DATABASE_BYTES = 512 * 1024 * 1024
+DEFAULT_MAX_BLOB_BYTES = 768 * 1024 * 1024
+MIN_BACKUP_MEMORY_BYTES = 64 * 1024 * 1024
 
 
 class BackupError(RuntimeError):
@@ -37,6 +40,46 @@ def _required(env: Mapping[str, str], name: str) -> str:
     if not value:
         raise BackupError(f"{name} 未配置")
     return value
+
+
+def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
+    try:
+        value = int(env.get(name, str(default)))
+    except ValueError as exc:
+        raise BackupError(f"{name} 必须是大于 0 的整数") from exc
+    if value < 1:
+        raise BackupError(f"{name} 必须是大于 0 的整数")
+    return value
+
+
+def _available_memory_bytes() -> int | None:
+    available: list[int] = []
+    try:
+        limit_text = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        if limit_text != "max":
+            used = int(Path("/sys/fs/cgroup/memory.current").read_text().strip())
+            available.append(max(0, int(limit_text) - used))
+    except (OSError, ValueError):
+        pass
+    try:
+        line = next(
+            line
+            for line in Path("/proc/meminfo").read_text().splitlines()
+            if line.startswith("MemAvailable:")
+        )
+        available.append(int(line.split()[1]) * 1024)
+    except (OSError, StopIteration, ValueError, IndexError):
+        pass
+    return min(available) if available else None
+
+
+def _preflight_size(size: int, limit: int, label: str) -> None:
+    if size > limit:
+        raise BackupError(f"{label}超过配置上限")
+    required = max(MIN_BACKUP_MEMORY_BYTES, size * 4)
+    available = _available_memory_bytes()
+    if available is not None and available < required:
+        raise BackupError(f"可用内存不足，{label}需要至少 {required} bytes")
 
 
 def _config(env: Mapping[str, str], *, require_source: bool = False) -> dict[str, Any]:
@@ -60,6 +103,12 @@ def _config(env: Mapping[str, str], *, require_source: bool = False) -> dict[str
         "access_key": _required(env, "BACKUP_ZOS_ACCESS_KEY"),
         "secret_key": _required(env, "BACKUP_ZOS_SECRET_KEY"),
         "passphrase": passphrase,
+        "max_database_bytes": _positive_int(
+            env, "BACKUP_MAX_DATABASE_BYTES", DEFAULT_MAX_DATABASE_BYTES
+        ),
+        "max_blob_bytes": _positive_int(
+            env, "BACKUP_MAX_BLOB_BYTES", DEFAULT_MAX_BLOB_BYTES
+        ),
     }
     if require_source:
         settings_key = _required(env, "SETTINGS_ENCRYPTION_KEY")
@@ -122,9 +171,11 @@ def build_backup(
     passphrase: str,
     *,
     now: datetime | None = None,
+    max_database_bytes: int = DEFAULT_MAX_DATABASE_BYTES,
 ) -> tuple[bytes, dict[str, Any]]:
     if not database_path.is_file():
         raise BackupError("SQLite 数据库不存在")
+    _preflight_size(database_path.stat().st_size, max_database_bytes, "SQLite 数据库")
     created = (now or datetime.now(UTC)).astimezone(UTC)
     with tempfile.TemporaryDirectory() as directory:
         snapshot_path = Path(directory) / "database.sqlite3"
@@ -135,6 +186,9 @@ def build_backup(
         finally:
             destination.close()
             source.close()
+        _preflight_size(
+            snapshot_path.stat().st_size, max_database_bytes, "SQLite 快照"
+        )
         database_bytes = snapshot_path.read_bytes()
         with sqlite3.connect(snapshot_path) as snapshot:
             summary = _database_summary(snapshot)
@@ -246,7 +300,10 @@ def _client(config: Mapping[str, Any]):
 def create(env: Mapping[str, str], client: Any | None = None) -> dict[str, Any]:
     config = _config(env, require_source=True)
     blob, manifest = build_backup(
-        config["database_path"], config["settings_key"], config["passphrase"]
+        config["database_path"],
+        config["settings_key"],
+        config["passphrase"],
+        max_database_bytes=config["max_database_bytes"],
     )
     created = datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
     object_key = (
@@ -286,7 +343,11 @@ def _download(
         raise BackupError("备份对象 Key 不属于配置的前缀")
     storage = client or _client(config)
     response = storage.get_object(Bucket=config["bucket"], Key=object_key)
-    blob = response["Body"].read()
+    content_length = response.get("ContentLength")
+    if content_length is not None:
+        _preflight_size(int(content_length), config["max_blob_bytes"], "备份对象")
+    blob = response["Body"].read(config["max_blob_bytes"] + 1)
+    _preflight_size(len(blob), config["max_blob_bytes"], "备份对象")
     expected = response.get("Metadata", {}).get("sha256")
     if expected and not hmac.compare_digest(hashlib.sha256(blob).hexdigest(), expected):
         raise BackupError("远端备份摘要不匹配")
@@ -324,10 +385,20 @@ def restore(
     }
 
 
+def create_and_verify(
+    env: Mapping[str, str], client: Any | None = None
+) -> dict[str, Any]:
+    storage = client or _client(_config(env, require_source=True))
+    created = create(env, storage)
+    checked = verify(env, created["object_key"], storage)
+    return {**created, "verified": checked["integrity"]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ZOS 私有加密备份")
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("create")
+    subcommands.add_parser("create-verify")
     verify_parser = subcommands.add_parser("verify")
     verify_parser.add_argument("object_key")
     restore_parser = subcommands.add_parser("restore")
@@ -337,6 +408,8 @@ def main() -> int:
     try:
         if arguments.command == "create":
             result = create(os.environ)
+        elif arguments.command == "create-verify":
+            result = create_and_verify(os.environ)
         elif arguments.command == "verify":
             result = verify(os.environ, arguments.object_key)
         else:

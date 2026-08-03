@@ -4,7 +4,7 @@
 >
 > 完整调用方与 Dashboard 接口契约见 [API.md](API.md)。本文与 `API.md` 已完成同步。
 >
-> 实现进度（2026-08-03）：SQLite schema v4 状态完整性、管理员控制面认证、Endpoint allowlist、无凭证对象管理清理，以及既有多预设、严格删除、恢复与 Dashboard 已完成。
+> 实现进度（2026-08-03）：SQLite schema v4 状态完整性、管理员控制面认证、有界恢复、事务化部署回滚、独立灾备工具，以及既有多预设、严格删除与 Dashboard 已完成。
 
 ## 1. 目标
 

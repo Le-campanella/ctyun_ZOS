@@ -161,3 +161,20 @@
 ### 下一步：Phase 4
 
 - 为部署增加远程锁、maintenance/drain、所有失败路径数据库回滚、首次失败清理和备份保留；让 verify/restore 不依赖运行容器。
+
+### 已完成：Phase 4 部署、回滚与灾难恢复
+
+- 发布产物先写入本次唯一 staging 目录，远程事务由 `flock` 串行化；锁冲突使用独立退出码，不会与发布失败混淆。
+- 已有服务在发布前优雅停服，随后创建并执行 SQLite `integrity_check`；新镜像先以不映射端口的候选容器检查 health/ready，再重建正式局域网入口。
+- 首次发布失败执行 Compose 清理；已有版本任意失败均恢复发布前数据库和旧镜像，同 schema 与跨 schema 使用同一路径，自动回滚失败会输出严重错误而不伪报成功。
+- `deploy-backups/` 分别保留普通发布与跨 schema 快照，同时受总容量限制，并保护最新快照和最近跨 schema 快照。
+- 私有异地备份增加数据库/备份对象大小和可用内存预检；每日任务改为上传后立即下载、解密、摘要及 SQLite 完整性校验。
+- `verify/restore` 支持固定 `BACKUP_IMAGE`，没有运行服务时也可执行；未指定镜像时可从当前 checkout 构建独立 runtime 工具镜像。
+- README 补充私有 Bucket Policy、Block Public Access、匿名 HEAD 验收以及空白 Linux 主机恢复步骤。
+- mock Docker 覆盖首次发布失败、同 schema 回滚、跨 schema 回滚和无运行服务的固定工具镜像验证；完整容器测试 `91 passed`，生产镜像与两个灾备 CLI smoke test 通过。
+- 未直接在当前远程服务器执行破坏性发布故障演练；真实首次/同 schema/跨 schema 演练留到发布验收窗口，避免未经确认停服或回滚生产数据。
+
+### 下一步：Phase 5
+
+- 移除上传二次 spool 并统一请求资源清理；隔离阻塞数据库工作并限制 Provider cache。
+- 在明确兼容策略后引入调用方身份、作用域幂等键、限流与配额。
