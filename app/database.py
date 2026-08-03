@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
-
 SCHEMA_VERSION = 5
 DEFAULT_PRESET_ID = "00000000-0000-0000-0000-000000000001"
 SCHEMA_V1 = """
@@ -259,16 +258,19 @@ SCHEMA_V4 = (
     + SERVICE_LOG_SCHEMA
 )
 
-UPLOAD_TASK_SCHEMA_V5 = UPLOAD_TASK_SCHEMA_V4.replace(
-    "    request_id TEXT NOT NULL,\n    idempotency_key TEXT,",
-    "    request_id TEXT NOT NULL,\n    client_id TEXT NOT NULL,\n    idempotency_key TEXT,",
-).replace(
-    "ON upload_tasks(idempotency_key) WHERE idempotency_key IS NOT NULL;",
-    "ON upload_tasks(client_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
-) + """
+UPLOAD_TASK_SCHEMA_V5 = (
+    UPLOAD_TASK_SCHEMA_V4.replace(
+        "    request_id TEXT NOT NULL,\n    idempotency_key TEXT,",
+        "    request_id TEXT NOT NULL,\n    client_id TEXT NOT NULL,\n    idempotency_key TEXT,",
+    ).replace(
+        "ON upload_tasks(idempotency_key) WHERE idempotency_key IS NOT NULL;",
+        "ON upload_tasks(client_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
+    )
+    + """
 CREATE INDEX idx_upload_tasks_client_object_status
 ON upload_tasks(client_id, object_status, status);
 """
+)
 
 SCHEMA_V5 = (
     PRESET_SCHEMA_V3
@@ -600,14 +602,17 @@ class Database:
         columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(upload_tasks)")
         }
-        if not {
-            "etag",
-            "version_id",
-            "delete_token_hash",
-            "object_status",
-            "deleted_at",
-            "client_id",
-        } <= columns:
+        if (
+            not {
+                "etag",
+                "version_id",
+                "delete_token_hash",
+                "object_status",
+                "deleted_at",
+                "client_id",
+            }
+            <= columns
+        ):
             raise RuntimeError("upload task schema v5 is incomplete")
         upload_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='upload_tasks'"
@@ -913,9 +918,7 @@ class Database:
                 current_key != expected_default_preset
                 or target["state_revision"] != expected_state_revision
             ):
-                raise DefaultPresetConflict(
-                    current_key, target["state_revision"]
-                )
+                raise DefaultPresetConflict(current_key, target["state_revision"])
             if not target["enabled"]:
                 raise ValueError("default preset must be enabled")
             if current and current["id"] == target["id"]:
@@ -1015,9 +1018,7 @@ class Database:
             if (max_objects and next_objects > max_objects) or (
                 max_bytes and next_bytes > max_bytes
             ):
-                raise QuotaExceeded(
-                    usage["object_count"], usage["size_bytes"]
-                )
+                raise QuotaExceeded(usage["object_count"], usage["size_bytes"])
             self._insert_task(connection, record)
 
     def update_task(self, task_id: str, **changes: Any) -> None:
@@ -1094,9 +1095,7 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def task_by_idempotency(
-        self, client_id: str, key: str
-    ) -> dict[str, Any] | None:
+    def task_by_idempotency(self, client_id: str, key: str) -> dict[str, Any] | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
                 """
@@ -1268,7 +1267,8 @@ class Database:
         from_time: str | None = None,
         to_time: str | None = None,
     ) -> list[dict[str, Any]]:
-        where, values = ["level_no>=?"], [min_level]
+        where = ["level_no>=?"]
+        values: list[Any] = [min_level]
         if before_id is not None:
             where.append("id<?")
             values.append(before_id)
@@ -1289,7 +1289,7 @@ class Database:
             rows = connection.execute(
                 f"""
                 SELECT * FROM service_logs
-                WHERE {' AND '.join(where)}
+                WHERE {" AND ".join(where)}
                 ORDER BY id DESC LIMIT ?
                 """,
                 (*values, limit),
@@ -1349,7 +1349,9 @@ class Database:
 
     def check_writable(self) -> None:
         with self.transaction() as connection:
-            connection.execute("CREATE TEMP TABLE IF NOT EXISTS healthcheck (value INT)")
+            connection.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS healthcheck (value INT)"
+            )
 
     def maintain(
         self, task_retention_days: int, log_retention_days: int, log_max_rows: int
@@ -1412,9 +1414,7 @@ class PresetStateConflict(Exception):
 
 
 class DefaultPresetConflict(Exception):
-    def __init__(
-        self, current_default_preset: str | None, current_state_revision: int
-    ):
+    def __init__(self, current_default_preset: str | None, current_state_revision: int):
         self.current_default_preset = current_default_preset
         self.current_state_revision = current_state_revision
 

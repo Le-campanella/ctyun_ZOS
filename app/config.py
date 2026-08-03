@@ -27,7 +27,9 @@ def _boolean(name: str, default: bool) -> bool:
 
 
 def _csv(name: str, default: str = "") -> tuple[str, ...]:
-    return tuple(item.strip() for item in os.getenv(name, default).split(",") if item.strip())
+    return tuple(
+        item.strip() for item in os.getenv(name, default).split(",") if item.strip()
+    )
 
 
 def _client_keys(name: str) -> tuple[tuple[str, str], ...]:
@@ -95,14 +97,14 @@ class Settings:
         if len(set(self.admin_api_keys)) != len(self.admin_api_keys) or any(
             len(key) < 32 for key in self.admin_api_keys
         ):
-            raise ValueError("ADMIN_API_KEYS must contain unique keys of at least 32 characters")
+            raise ValueError(
+                "ADMIN_API_KEYS must contain unique keys of at least 32 characters"
+            )
         if len({item[0] for item in self.client_api_keys}) != len(
             self.client_api_keys
         ) or any(
             len(key) < 32
-            or not re.fullmatch(
-                r"[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?", client_id
-            )
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?", client_id)
             for client_id, key in self.client_api_keys
         ):
             raise ValueError("CLIENT_API_KEYS contains invalid or duplicate entries")
@@ -121,9 +123,7 @@ class Settings:
             storage_endpoint_allowlist=_csv(
                 "STORAGE_ENDPOINT_ALLOWLIST", ".zos.ctyun.cn"
             ),
-            allow_insecure_storage_http=_boolean(
-                "ALLOW_INSECURE_STORAGE_HTTP", False
-            ),
+            allow_insecure_storage_http=_boolean("ALLOW_INSECURE_STORAGE_HTTP", False),
             database_path=Path(os.getenv("DATABASE_PATH", "/data/db/zos-upload.db")),
             temp_dir=Path(os.getenv("TEMP_DIR", "/data/tmp")),
             app_timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai"),
@@ -134,9 +134,7 @@ class Settings:
                 "UPLOAD_RATE_LIMIT_PER_MINUTE", 60, 1
             ),
             client_max_objects=_integer("CLIENT_MAX_OBJECTS", 10_000),
-            client_max_bytes=_integer(
-                "CLIENT_MAX_BYTES", 1_099_511_627_776
-            ),
+            client_max_bytes=_integer("CLIENT_MAX_BYTES", 1_099_511_627_776),
             temp_min_free_bytes=_integer("TEMP_MIN_FREE_BYTES", 1_073_741_824),
             sqlite_busy_timeout_ms=_integer("SQLITE_BUSY_TIMEOUT_MS", 5_000, 1),
             recovery_retry_seconds=_integer("RECOVERY_RETRY_SECONDS", 60, 1),
@@ -144,9 +142,7 @@ class Settings:
                 "RECOVERY_INITIAL_BUDGET_SECONDS", 5, 1
             ),
             recovery_batch_size=_integer("RECOVERY_BATCH_SIZE", 25, 1),
-            recovery_max_concurrency=_integer(
-                "RECOVERY_MAX_CONCURRENCY", 4, 1
-            ),
+            recovery_max_concurrency=_integer("RECOVERY_MAX_CONCURRENCY", 4, 1),
             recovery_connect_timeout_seconds=_integer(
                 "RECOVERY_CONNECT_TIMEOUT_SECONDS", 3, 1
             ),
@@ -171,12 +167,8 @@ class Settings:
             s3_multipart_chunk_bytes=_integer(
                 "S3_MULTIPART_CHUNK_BYTES", 16_777_216, 5_242_880
             ),
-            s3_transfer_max_concurrency=_integer(
-                "S3_TRANSFER_MAX_CONCURRENCY", 2, 1
-            ),
-            provider_cache_max_entries=_integer(
-                "PROVIDER_CACHE_MAX_ENTRIES", 128, 1
-            ),
+            s3_transfer_max_concurrency=_integer("S3_TRANSFER_MAX_CONCURRENCY", 2, 1),
+            provider_cache_max_entries=_integer("PROVIDER_CACHE_MAX_ENTRIES", 128, 1),
             dashboard_enabled=_boolean("DASHBOARD_ENABLED", True),
             bootstrap_storage_from_env=_boolean("BOOTSTRAP_STORAGE_FROM_ENV", True),
         )

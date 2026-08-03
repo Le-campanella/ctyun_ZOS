@@ -8,7 +8,6 @@ from typing import Any
 
 from .database import Database, utc_now
 
-
 NOTIFY = 25
 logging.addLevelName(NOTIFY, "NOTIFY")
 SENSITIVE = re.compile(
@@ -21,7 +20,10 @@ def _clean(value: Any, key: str = "") -> Any:
     if SENSITIVE.search(key):
         return "[REDACTED]"
     if isinstance(value, dict):
-        return {str(item)[:100]: _clean(content, str(item)) for item, content in value.items()}
+        return {
+            str(item)[:100]: _clean(content, str(item))
+            for item, content in value.items()
+        }
     if isinstance(value, list):
         return [_clean(item) for item in value[:100]]
     if isinstance(value, str):
@@ -67,7 +69,9 @@ class EventLogger:
             "error_code": _clean(error_code) if error_code else None,
             "details": _clean(details) if details else None,
         }
-        self._logger.log(level, json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        self._logger.log(
+            level, json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        )
         if level >= NOTIFY:
             try:
                 self.database.write_log(record)

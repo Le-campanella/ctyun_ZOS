@@ -9,13 +9,63 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
       - name: Build test image
         run: docker build --target test -t zos-upload-service:test .
+
+      - name: Lint Python
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src zos-upload-service:test ruff check --no-cache app tests scripts/export_openapi.py
+          docker run --rm -v "$PWD:/src" -w /src zos-upload-service:test ruff format --no-cache --check app tests scripts/export_openapi.py
+
+      - name: Type check Python
+        run: docker run --rm -v "$PWD:/src" -w /src zos-upload-service:test mypy app
+
       - name: Run tests
         run: docker run --rm zos-upload-service:test
+
+      - name: Verify OpenAPI snapshot
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/src" -w /src zos-upload-service:test python -m scripts.export_openapi
+          git diff --exit-code -- docs/current/openapi.json
+
+      - name: Audit Python dependencies
+        run: docker run --rm zos-upload-service:test pip-audit -r requirements.lock --disable-pip
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install --yes shellcheck
+
+      - name: Lint shell scripts
+        run: shellcheck --severity=warning deploy.sh scripts/*.sh
+
       - name: Build runtime image
         run: docker build --target runtime -t zos-upload-service:runtime .
+
+      - name: Scan runtime image
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e image
+          --scanners vuln --exit-code 1 --ignore-unfixed
+          --severity CRITICAL,HIGH --skip-version-check
+          zos-upload-service:runtime
+
+      - name: Generate SBOM
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock
+          -v "$PWD:/workspace"
+          aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e image
+          --format cyclonedx --output /workspace/sbom.cdx.json
+          zos-upload-service:runtime
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zos-upload-service-sbom
+          path: sbom.cdx.json

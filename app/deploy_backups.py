@@ -6,7 +6,6 @@ import re
 import sqlite3
 from pathlib import Path
 
-
 SNAPSHOT_RE = re.compile(r"^deploy-.+-from-(\d+)-to-(\d+)\.sqlite3$")
 
 
@@ -99,11 +98,14 @@ def main() -> int:
     elif arguments.command == "restore":
         restore(arguments.source, arguments.destination)
     else:
-        if min(
-            arguments.keep_releases,
-            arguments.keep_migrations,
-            arguments.max_bytes,
-        ) < 1:
+        if (
+            min(
+                arguments.keep_releases,
+                arguments.keep_migrations,
+                arguments.max_bytes,
+            )
+            < 1
+        ):
             parser.error("保留数量和容量必须大于 0")
         print(
             json.dumps(

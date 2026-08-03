@@ -60,7 +60,7 @@ def test_compose_has_bounded_logs_and_restricted_runtime():
 
 def test_first_deployment_failure_has_explicit_cleanup():
     script = (ROOT / "scripts/deploy-release.sh").read_text()
-    assert "docker compose --project-name \"$project\" down" in script
+    assert 'docker compose --project-name "$project" down' in script
 
 
 def test_same_schema_rollback_restores_database_snapshot():
@@ -77,8 +77,8 @@ def test_release_is_locked_drained_and_checked_before_cutover():
     assert release.index('stop -t "$drain_seconds"') < release.index(
         "app.deploy_backups snapshot"
     )
-    assert release.index("compose --project-name \"$project\" run") < release.rindex(
-        "compose --project-name \"$project\" up"
+    assert release.index('compose --project-name "$project" run') < release.rindex(
+        'compose --project-name "$project" up'
     )
     assert "app.deploy_backups prune" in release
 
@@ -94,12 +94,12 @@ def test_failed_release_cleans_first_deploy_or_restores_snapshot(
     remote = home / "service"
     staging = remote / ".deploy-staging" / "new"
     staging.mkdir(parents=True)
-    (remote / ".env").write_text(
-        "SETTINGS_ENCRYPTION_KEY=test\nADMIN_API_KEYS=test\n"
-    )
+    (remote / ".env").write_text("SETTINGS_ENCRYPTION_KEY=test\nADMIN_API_KEYS=test\n")
     with tarfile.open(staging / "source.tar.gz", "w:gz"):
         pass
-    (staging / "image.tar.gz").write_bytes(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+    (staging / "image.tar.gz").write_bytes(
+        b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    )
 
     binaries = tmp_path / "bin"
     binaries.mkdir()

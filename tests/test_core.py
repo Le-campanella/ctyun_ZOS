@@ -15,15 +15,15 @@ from cryptography.fernet import Fernet
 
 from app.config import Settings
 from app.database import (
+    SCHEMA_VERSION,
     Database,
     DefaultPresetConflict,
     PresetStateConflict,
     QuotaExceeded,
     RevisionConflict,
-    SCHEMA_VERSION,
     utc_now,
 )
-from app.eventlog import EventLogger, NOTIFY
+from app.eventlog import NOTIFY, EventLogger
 from app.providers import (
     CtyunZosProvider,
     ObjectMetadata,
@@ -58,9 +58,7 @@ def test_client_key_configuration_rejects_weak_or_duplicate_entries(monkeypatch)
         Settings.from_env()
 
     key = "x" * 32
-    monkeypatch.setenv(
-        "CLIENT_API_KEYS", f"service-a:{key},service-a:{key}"
-    )
+    monkeypatch.setenv("CLIENT_API_KEYS", f"service-a:{key},service-a:{key}")
     with pytest.raises(ValueError, match="unique"):
         Settings.from_env()
 
@@ -262,7 +260,9 @@ def test_task_queries_are_stable_and_filterable(database: Database, settings):
 
     items = database.list_tasks(limit=10, offset=0)
     assert [item["id"] for item in items] == [newer["id"], older["id"]]
-    assert database.list_tasks(limit=10, offset=0, status="failed")[0]["id"] == newer["id"]
+    assert (
+        database.list_tasks(limit=10, offset=0, status="failed")[0]["id"] == newer["id"]
+    )
     assert database.task_by_id(newer["id"])["storage_config_revision"] == 1
 
 
@@ -446,15 +446,16 @@ def test_summary_percentile_log_pagination_and_retention(database: Database):
         }
     )
     first = database.list_logs(min_level=NOTIFY, limit=2)
-    second = database.list_logs(
-        min_level=NOTIFY, limit=2, before_id=first[-1]["id"]
-    )
+    second = database.list_logs(min_level=NOTIFY, limit=2, before_id=first[-1]["id"])
     assert not {item["id"] for item in first} & {item["id"] for item in second}
-    assert len(
-        database.list_logs(
-            min_level=NOTIFY, limit=10, filters={"request_id": "keep"}
+    assert (
+        len(
+            database.list_logs(
+                min_level=NOTIFY, limit=10, filters={"request_id": "keep"}
+            )
         )
-    ) == 2
+        == 2
+    )
     with pytest.raises(ValueError, match="invalid log filter"):
         database.list_logs(
             min_level=NOTIFY, limit=10, filters={"unsafe_column": "value"}
@@ -580,7 +581,9 @@ def test_upload_client_errors_classify_remote_side_effect(settings, status, unce
     )
 
     with pytest.raises(ProviderError) as failure:
-        provider.upload_file(BytesIO(b"payload"), "object.bin", "application/octet-stream")
+        provider.upload_file(
+            BytesIO(b"payload"), "object.bin", "application/octet-stream"
+        )
 
     assert failure.value.uncertain is uncertain
 
@@ -661,7 +664,10 @@ def test_default_registry_exposes_ctyun_and_generic_s3(settings):
     [
         ({"bucket": "INVALID"}, "STORAGE_CONFIG_INVALID"),
         ({"endpoint_url": "file:///tmp/object"}, "STORAGE_CONFIG_INVALID"),
-        ({"public_base_url": "https://user:pass@example.com"}, "STORAGE_CONFIG_INVALID"),
+        (
+            {"public_base_url": "https://user:pass@example.com"},
+            "STORAGE_CONFIG_INVALID",
+        ),
         ({"read_timeout_seconds": 0}, "STORAGE_CONFIG_INVALID"),
     ],
 )

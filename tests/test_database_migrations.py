@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.database import Database, SCHEMA_V1, SCHEMA_VERSION
-
+from app.database import SCHEMA_V1, SCHEMA_VERSION, Database
 
 CONFIG_IDS = ("config-v1", "config-v2")
 TASK_IDS = {
@@ -119,7 +118,10 @@ def test_empty_database_creates_current_schema_and_is_idempotent(tmp_path: Path)
             "upload_tasks",
             "service_logs",
         } <= tables
-        assert connection.execute("SELECT COUNT(*) FROM storage_presets").fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM storage_presets").fetchone()[0]
+            == 0
+        )
 
 
 def test_v1_to_current_preserves_ids_revisions_tasks_and_creates_backup(tmp_path: Path):
@@ -133,7 +135,9 @@ def test_v1_to_current_preserves_ids_revisions_tasks_and_creates_backup(tmp_path
     assert backup.name.startswith("service.db.pre-v5-")
     with sqlite3.connect(backup) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
-        assert connection.execute("SELECT COUNT(*) FROM upload_tasks").fetchone()[0] == 4
+        assert (
+            connection.execute("SELECT COUNT(*) FROM upload_tasks").fetchone()[0] == 4
+        )
 
     with database.connect() as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
@@ -170,7 +174,9 @@ def test_v1_to_current_preserves_ids_revisions_tasks_and_creates_backup(tmp_path
         assert all(row["delete_token_hash"] is None for row in tasks)
         assert {row["client_id"] for row in tasks} == {"legacy"}
         assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
-        assert connection.execute("SELECT COUNT(*) FROM service_logs").fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM service_logs").fetchone()[0] == 1
+        )
 
     assert database.initialize() is None
 
@@ -204,17 +210,23 @@ def test_v2_to_v4_allows_revision_one_per_preset(tmp_path: Path):
             """
         )
     with database.connect() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM storage_configs WHERE revision=1"
-        ).fetchone()[0] == 2
-        assert connection.execute(
-            """
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM storage_configs WHERE revision=1"
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            connection.execute(
+                """
             SELECT COUNT(*) FROM (
                 SELECT preset_id FROM storage_configs
                 WHERE status='active' GROUP BY preset_id
             )
             """
-        ).fetchone()[0] == 2
+            ).fetchone()[0]
+            == 2
+        )
 
 
 def test_v2_to_v3_failure_rolls_back_current_migration(tmp_path: Path, monkeypatch):
@@ -240,7 +252,9 @@ def test_v2_to_v3_failure_rolls_back_current_migration(tmp_path: Path, monkeypat
         }
         assert "upload_tasks" in tables
         assert "broken_tasks" not in tables
-        assert connection.execute("SELECT COUNT(*) FROM upload_tasks").fetchone()[0] == 4
+        assert (
+            connection.execute("SELECT COUNT(*) FROM upload_tasks").fetchone()[0] == 4
+        )
 
 
 def test_v3_to_v4_marks_unclaimed_objects_and_enforces_state_invariants(

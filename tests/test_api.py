@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import base64
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
-from io import BytesIO
-from pathlib import Path
 import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
 from typing import BinaryIO
@@ -111,9 +110,7 @@ class FakeProvider(StorageProvider):
             last_modified="2026-07-31T00:00:00Z",
         )
 
-    def delete_object(
-        self, object_key: str, version_id: str | None = None
-    ) -> None:
+    def delete_object(self, object_key: str, version_id: str | None = None) -> None:
         self.delete_calls.append((object_key, version_id))
         self.__class__.delete_requests.append((object_key, version_id))
         if self.config.get("block_delete"):
@@ -209,9 +206,12 @@ def test_admin_routes_require_key_while_upload_data_plane_stays_open(client):
     authorization = client.headers.pop("Authorization")
     try:
         assert client.get("/healthz").status_code == 200
-        assert client.post(
-            "/v1/uploads/validate", files={"file": ("test.bin", b"payload")}
-        ).status_code == 200
+        assert (
+            client.post(
+                "/v1/uploads/validate", files={"file": ("test.bin", b"payload")}
+            ).status_code
+            == 200
+        )
         for path in (
             "/v1/settings/storage",
             "/v1/upload-tasks",
@@ -226,12 +226,13 @@ def test_admin_routes_require_key_while_upload_data_plane_stays_open(client):
             headers={"Authorization": "Bearer " + "x" * 32},
         )
         assert wrong.status_code == 401
-        basic = base64.b64encode(
-            b"admin:test-admin-key-000000000000000000"
-        ).decode()
-        assert client.get(
-            "/v1/settings/storage", headers={"Authorization": f"Basic {basic}"}
-        ).status_code == 200
+        basic = base64.b64encode(b"admin:test-admin-key-000000000000000000").decode()
+        assert (
+            client.get(
+                "/v1/settings/storage", headers={"Authorization": f"Basic {basic}"}
+            ).status_code
+            == 200
+        )
     finally:
         client.headers["Authorization"] = authorization
 
@@ -309,9 +310,12 @@ def test_source_ip_rate_limit_returns_retry_after(settings, database, registry):
     )
     with TestClient(app, raise_server_exceptions=False) as test_client:
         for _ in range(2):
-            assert test_client.post(
-                "/v1/uploads/validate", files={"file": ("a.bin", b"a")}
-            ).status_code == 200
+            assert (
+                test_client.post(
+                    "/v1/uploads/validate", files={"file": ("a.bin", b"a")}
+                ).status_code
+                == 200
+            )
         blocked = test_client.post(
             "/v1/uploads/validate", files={"file": ("a.bin", b"a")}
         )
@@ -409,7 +413,9 @@ def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     chart = client.get("/static/chart.umd.min.js")
 
     assert dashboard.status_code == settings.status_code == 200
-    assert dashboard_js.status_code == settings_js.status_code == chart.status_code == 200
+    assert (
+        dashboard_js.status_code == settings_js.status_code == chart.status_code == 200
+    )
     assert 'src="/static/chart.umd.min.js"' in dashboard.text
     assert "https://" not in dashboard.text
     assert 'type="password"' in settings.text
@@ -419,7 +425,9 @@ def test_dashboard_is_local_static_and_never_embeds_credentials(client):
     assert "localStorage" not in settings_js.text
     assert "sessionStorage" not in settings_js.text
     assert 'id="receive-test-file"' in dashboard.text
-    assert 'id="receive-test-real-upload" type="checkbox" role="switch"' in dashboard.text
+    assert (
+        'id="receive-test-real-upload" type="checkbox" role="switch"' in dashboard.text
+    )
     assert 'id="receive-test-preset"' in dashboard.text
     assert 'id="preset-list"' in settings.text
     assert 'id="preset-key"' in settings.text
@@ -458,9 +466,7 @@ def test_receive_validation_works_unconfigured_without_task_or_storage(client):
     assert client.get("/v1/upload-tasks").json()["items"] == []
     assert FakeProvider.objects == {}
 
-    empty = client.post(
-        "/v1/uploads/validate", files={"file": ("empty.txt", b"")}
-    )
+    empty = client.post("/v1/uploads/validate", files={"file": ("empty.txt", b"")})
     oversized = client.post(
         "/v1/uploads/validate", files={"file": ("large.bin", b"x" * 101)}
     )
@@ -470,7 +476,9 @@ def test_receive_validation_works_unconfigured_without_task_or_storage(client):
 
 
 def test_settings_activation_masks_credentials_and_preserves_them(client, database):
-    assert client.get("/v1/settings/storage/providers").json()["items"][0]["id"] == "fake"
+    assert (
+        client.get("/v1/settings/storage/providers").json()["items"][0]["id"] == "fake"
+    )
     result = activate(client).json()
     assert result["revision"] == 1
     assert result["credentials"]["access_key_masked"] == "****t-ak"
@@ -863,9 +871,7 @@ def test_upload_freezes_selected_preset_revision(client):
     first_task = client.get(
         f"/v1/upload-tasks/{first_response.json()['task_id']}"
     ).json()
-    second_task = client.get(
-        f"/v1/upload-tasks/{second.json()['task_id']}"
-    ).json()
+    second_task = client.get(f"/v1/upload-tasks/{second.json()['task_id']}").json()
     assert first_task["storage_config_revision"] == 1
     assert second_task["storage_config_revision"] == 2
 
@@ -983,12 +989,12 @@ def test_verified_delete_is_version_exact_and_idempotent(client):
     assert detail["delete_started_at"] is not None
     assert upload["delete_token"] not in client.get("/v1/upload-tasks").text
     assert upload["delete_token"] not in client.get("/dashboard").text
-    started = client.get(
-        "/v1/dashboard/logs?event=object_delete_started"
-    ).json()["items"]
-    succeeded = client.get(
-        "/v1/dashboard/logs?event=object_delete_succeeded"
-    ).json()["items"]
+    started = client.get("/v1/dashboard/logs?event=object_delete_started").json()[
+        "items"
+    ]
+    succeeded = client.get("/v1/dashboard/logs?event=object_delete_succeeded").json()[
+        "items"
+    ]
     assert started[0]["details"]["to_status"] == "deleting"
     assert succeeded[0]["details"]["provider_result"] == "confirmed_absent"
     assert upload["delete_token"] not in str(started + succeeded)
@@ -996,9 +1002,7 @@ def test_verified_delete_is_version_exact_and_idempotent(client):
 
 def test_delete_rejects_invalid_capability_body_and_legacy_task(client):
     activate(client)
-    first = client.post(
-        "/v1/uploads", files={"file": ("first.txt", b"first")}
-    ).json()
+    first = client.post("/v1/uploads", files={"file": ("first.txt", b"first")}).json()
     second = client.post(
         "/v1/uploads", files={"file": ("second.txt", b"second")}
     ).json()
@@ -1006,18 +1010,21 @@ def test_delete_rejects_invalid_capability_body_and_legacy_task(client):
 
     assert client.delete(path).status_code == 403
     assert (
-        client.delete(path, headers={"X-Delete-Token": "x" * 257})
-        .json()["error"]["code"]
+        client.delete(path, headers={"X-Delete-Token": "x" * 257}).json()["error"][
+            "code"
+        ]
         == "DELETE_TOKEN_INVALID"
     )
     assert (
-        client.delete(path, headers={"X-Delete-Token": "tampered"})
-        .json()["error"]["code"]
+        client.delete(path, headers={"X-Delete-Token": "tampered"}).json()["error"][
+            "code"
+        ]
         == "DELETE_TOKEN_INVALID"
     )
     assert (
-        client.delete(path, headers={"X-Delete-Token": second["delete_token"]})
-        .json()["error"]["code"]
+        client.delete(path, headers={"X-Delete-Token": second["delete_token"]}).json()[
+            "error"
+        ]["code"]
         == "DELETE_TOKEN_INVALID"
     )
     body = client.request(
@@ -1033,9 +1040,7 @@ def test_delete_rejects_invalid_capability_body_and_legacy_task(client):
     client.app.state.runtime.database.update_task(
         first["task_id"], object_status="legacy_unverified"
     )
-    legacy = client.delete(
-        path, headers={"X-Delete-Token": first["delete_token"]}
-    )
+    legacy = client.delete(path, headers={"X-Delete-Token": first["delete_token"]})
     assert legacy.status_code == 409
     assert legacy.json()["error"]["code"] == "OBJECT_NOT_DELETABLE"
     missing = client.delete(
@@ -1073,9 +1078,7 @@ def test_delete_refuses_changed_remote_object(client, change):
 
 def test_delete_marks_preexisting_absence_without_provider_delete(client):
     activate(client)
-    upload = client.post(
-        "/v1/uploads", files={"file": ("absent.txt", b"gone")}
-    ).json()
+    upload = client.post("/v1/uploads", files={"file": ("absent.txt", b"gone")}).json()
     FakeProvider.objects.pop(upload["key"])
 
     response = client.delete(
@@ -1119,9 +1122,7 @@ def test_delete_provider_failure_is_never_reported_as_success(
     assert task["delete_error_code"] == code
 
 
-def test_restart_recovers_uncertain_delete_to_deleted(
-    settings, database, registry
-):
+def test_restart_recovers_uncertain_delete_to_deleted(settings, database, registry):
     first_app = create_app(
         settings=settings,
         registry=registry,
@@ -1152,9 +1153,7 @@ def test_restart_recovers_uncertain_delete_to_deleted(
     )
     with TestClient(second_app, raise_server_exceptions=False) as second_client:
         second_client.headers["Authorization"] = ADMIN_AUTH
-        recovered = second_client.get(
-            f"/v1/upload-tasks/{upload['task_id']}"
-        ).json()
+        recovered = second_client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
         assert recovered["object_status"] == "deleted"
         assert recovered["deleted_at"] is not None
         audit = second_client.get(
@@ -1225,9 +1224,7 @@ def test_recovery_claims_only_stale_deleting_tasks(
 
     client.portal.call(runtime.recover)
     task = client.get(f"/v1/upload-tasks/{upload['task_id']}").json()
-    recent_task = client.get(
-        f"/v1/upload-tasks/{recent['task_id']}"
-    ).json()
+    recent_task = client.get(f"/v1/upload-tasks/{recent['task_id']}").json()
     assert task["object_status"] == expected_status
     assert recent_task["object_status"] == "deleting"
     if expected_status == "deleted":
@@ -1259,9 +1256,7 @@ def test_concurrent_delete_has_one_provider_caller(client):
 
 def test_delete_database_failure_does_not_claim_success(client, monkeypatch):
     activate(client)
-    upload = client.post(
-        "/v1/uploads", files={"file": ("db.txt", b"payload")}
-    ).json()
+    upload = client.post("/v1/uploads", files={"file": ("db.txt", b"payload")}).json()
     database = client.app.state.runtime.database
     original = database.update_task
 
@@ -1294,9 +1289,7 @@ def test_empty_oversized_multiple_files_and_failed_idempotency(client):
     assert empty_task["status"] == "failed"
     assert empty_task["object_status"] == "absent"
 
-    oversized = client.post(
-        "/v1/uploads", files={"file": ("large.bin", b"x" * 101)}
-    )
+    oversized = client.post("/v1/uploads", files={"file": ("large.bin", b"x" * 101)})
     assert oversized.status_code == 413
     assert oversized.json()["error"]["code"] == "FILE_TOO_LARGE"
 
@@ -1317,9 +1310,7 @@ def test_empty_oversized_multiple_files_and_failed_idempotency(client):
 
 def test_upload_provider_failure_is_persisted(client):
     activate(client, fail_upload=True)
-    response = client.post(
-        "/v1/uploads", files={"file": ("a.bin", b"payload")}
-    )
+    response = client.post("/v1/uploads", files={"file": ("a.bin", b"payload")})
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "UPLOAD_FAILED"
     task = client.get(f"/v1/upload-tasks/{response.json()['task_id']}").json()
@@ -1431,9 +1422,10 @@ def test_upload_path_reuses_framework_spool_without_second_copy():
 
 def test_upload_form_closes_framework_file(client):
     activate(client)
-    assert client.post(
-        "/v1/uploads", files={"file": ("a.bin", b"payload")}
-    ).status_code == 201
+    assert (
+        client.post("/v1/uploads", files={"file": ("a.bin", b"payload")}).status_code
+        == 201
+    )
     assert FakeProvider.last_upload_file.closed is True
 
 
@@ -1508,8 +1500,8 @@ def test_bad_headers_queries_and_request_body_limit(client):
             "Content-Length": "10",
         },
         content=(
-            b"--x\r\nContent-Disposition: form-data; name=\"file\"; "
-            b"filename=\"a.bin\"\r\n\r\n" + b"x" * 2_100 + b"\r\n--x--\r\n"
+            b'--x\r\nContent-Disposition: form-data; name="file"; '
+            b'filename="a.bin"\r\n\r\n' + b"x" * 2_100 + b"\r\n--x--\r\n"
         ),
     )
     assert no_content_length.status_code == 413
@@ -1599,9 +1591,7 @@ def test_recovery_resolves_existing_and_missing_objects(settings, database, regi
         assert "absent" in object_states.values()
 
 
-def test_final_database_failure_recovers_as_present_unclaimed(
-    client, monkeypatch
-):
+def test_final_database_failure_recovers_as_present_unclaimed(client, monkeypatch):
     activate(client)
     database = client.app.state.runtime.database
     original = database.update_task

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 import socket
-from ipaddress import ip_address, ip_network
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from ipaddress import ip_address, ip_network
 from time import monotonic
 from typing import Any, BinaryIO
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -21,7 +21,6 @@ from botocore.exceptions import (
 )
 
 from .config import Settings
-
 
 BUCKET_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")
 ALWAYS_BLOCKED_ENDPOINTS = {ip_address("169.254.169.254")}
@@ -56,7 +55,9 @@ def validate_endpoint_access(endpoint_url: str, settings: Settings) -> None:
     if not host or parsed.scheme not in {"http", "https"}:
         raise ProviderError("STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 格式不合法")
     if parsed.scheme != "https" and not settings.allow_insecure_storage_http:
-        raise ProviderError("STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 必须使用 HTTPS")
+        raise ProviderError(
+            "STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 必须使用 HTTPS"
+        )
     host_rules: list[str] = []
     networks = []
     for rule in settings.storage_endpoint_allowlist:
@@ -65,8 +66,7 @@ def validate_endpoint_access(endpoint_url: str, settings: Settings) -> None:
         except ValueError:
             host_rules.append(rule.lower())
     host_match = any(
-        host.lower() == rule
-        or (rule.startswith(".") and host.lower().endswith(rule))
+        host.lower() == rule or (rule.startswith(".") and host.lower().endswith(rule))
         for rule in host_rules
     )
     try:
@@ -90,7 +90,9 @@ def validate_endpoint_access(endpoint_url: str, settings: Settings) -> None:
             or address.is_multicast
             or address.is_unspecified
         ):
-            raise ProviderError("STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 地址被禁止")
+            raise ProviderError(
+                "STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 地址被禁止"
+            )
         if address.is_private and not network_match:
             raise ProviderError(
                 "STORAGE_ENDPOINT_FORBIDDEN", "私网 Storage Endpoint 未进入 allowlist"
@@ -127,16 +129,21 @@ def matches_object_metadata(
         and expected_etag is not None
         and metadata.size_bytes == expected_size
         and metadata.etag == expected_etag
-        and (
-            expected_version_id is None
-            or metadata.version_id == expected_version_id
-        )
+        and (expected_version_id is None or metadata.version_id == expected_version_id)
     )
 
 
 class StorageProvider(ABC):
     provider_id: str
     schema_version: int
+
+    @abstractmethod
+    def __init__(
+        self,
+        config: dict[str, Any],
+        credentials: dict[str, str],
+        settings: Settings,
+    ) -> None: ...
 
     @classmethod
     @abstractmethod
@@ -162,17 +169,13 @@ class StorageProvider(ABC):
     ) -> ObjectMetadata | None: ...
 
     @abstractmethod
-    def delete_object(
-        self, object_key: str, version_id: str | None = None
-    ) -> None: ...
+    def delete_object(self, object_key: str, version_id: str | None = None) -> None: ...
 
     @abstractmethod
     def build_public_url(self, object_key: str) -> str: ...
 
     def get_metrics(self, _from_time: str, _to_time: str) -> dict[str, Any]:
-        raise ProviderError(
-            "STORAGE_METRICS_UNAVAILABLE", "Provider 不支持原生指标"
-        )
+        raise ProviderError("STORAGE_METRICS_UNAVAILABLE", "Provider 不支持原生指标")
 
 
 def _normalize_url(value: Any, *, allow_path: bool) -> str:
@@ -363,9 +366,7 @@ class CtyunZosProvider(StorageProvider):
         if not isinstance(verify_tls, bool) or not isinstance(metrics, bool):
             raise ProviderError("STORAGE_CONFIG_INVALID", "布尔配置格式不合法")
         normalized = {
-            "endpoint_url": _normalize_url(
-                config["endpoint_url"], allow_path=False
-            ),
+            "endpoint_url": _normalize_url(config["endpoint_url"], allow_path=False),
             "bucket": bucket,
             "public_base_url": _normalize_url(
                 config["public_base_url"], allow_path=True
@@ -373,9 +374,7 @@ class CtyunZosProvider(StorageProvider):
             "connect_timeout_seconds": _integer(
                 config, "connect_timeout_seconds", 1, 60
             ),
-            "read_timeout_seconds": _integer(
-                config, "read_timeout_seconds", 1, 3_600
-            ),
+            "read_timeout_seconds": _integer(config, "read_timeout_seconds", 1, 3_600),
             "max_attempts": _integer(config, "max_attempts", 0, 5),
             "verify_tls": verify_tls,
             "enable_bucket_metrics": metrics,
@@ -394,7 +393,9 @@ class CtyunZosProvider(StorageProvider):
                 "STORAGE_ENDPOINT_UNREACHABLE", "无法连接 Storage Endpoint"
             ) from exc
         except ReadTimeoutError as exc:
-            raise ProviderError("STORAGE_ENDPOINT_UNREACHABLE", "Storage Endpoint 超时") from exc
+            raise ProviderError(
+                "STORAGE_ENDPOINT_UNREACHABLE", "Storage Endpoint 超时"
+            ) from exc
         except ClientError as exc:
             status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
             code = exc.response.get("Error", {}).get("Code", "")
@@ -488,9 +489,7 @@ class CtyunZosProvider(StorageProvider):
                 "UPLOAD_CONFIRMATION_FAILED", "暂时无法确认远端对象", uncertain=True
             ) from exc
 
-    def delete_object(
-        self, object_key: str, version_id: str | None = None
-    ) -> None:
+    def delete_object(self, object_key: str, version_id: str | None = None) -> None:
         request = {"Bucket": self.bucket, "Key": object_key}
         if version_id is not None:
             request["VersionId"] = version_id

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import secrets
-from hmac import compare_digest
 from hashlib import sha256
+from hmac import compare_digest
 
 from cryptography.fernet import Fernet, InvalidToken
 

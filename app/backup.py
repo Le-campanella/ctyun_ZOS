@@ -22,7 +22,6 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from cryptography.fernet import Fernet, InvalidToken
 
-
 MAGIC = b"ZOSBACKUP1"
 SALT_BYTES = 16
 ARCHIVE_FILES = {"database.sqlite3", "manifest.json", "settings_encryption_key.txt"}
@@ -118,17 +117,13 @@ def _config(env: Mapping[str, str], *, require_source: bool = False) -> dict[str
             raise BackupError("SETTINGS_ENCRYPTION_KEY 格式无效") from exc
         config.update(
             settings_key=settings_key,
-            database_path=Path(
-                env.get("DATABASE_PATH", "/data/db/zos-upload.db")
-            ),
+            database_path=Path(env.get("DATABASE_PATH", "/data/db/zos-upload.db")),
         )
     return config
 
 
 def _cipher(passphrase: str, salt: bytes) -> Fernet:
-    key = hashlib.pbkdf2_hmac(
-        "sha256", passphrase.encode(), salt, 600_000, dklen=32
-    )
+    key = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, 600_000, dklen=32)
     return Fernet(base64.urlsafe_b64encode(key))
 
 
@@ -152,9 +147,9 @@ def _database_summary(connection: sqlite3.Connection) -> dict[str, Any]:
     }
     return {
         "schema_version": connection.execute("PRAGMA user_version").fetchone()[0],
-        "task_count": connection.execute("SELECT count(*) FROM upload_tasks").fetchone()[
-            0
-        ]
+        "task_count": connection.execute(
+            "SELECT count(*) FROM upload_tasks"
+        ).fetchone()[0]
         if "upload_tasks" in tables
         else 0,
         "preset_count": connection.execute(
@@ -186,9 +181,7 @@ def build_backup(
         finally:
             destination.close()
             source.close()
-        _preflight_size(
-            snapshot_path.stat().st_size, max_database_bytes, "SQLite 快照"
-        )
+        _preflight_size(snapshot_path.stat().st_size, max_database_bytes, "SQLite 快照")
         database_bytes = snapshot_path.read_bytes()
         with sqlite3.connect(snapshot_path) as snapshot:
             summary = _database_summary(snapshot)
@@ -235,12 +228,20 @@ def verify_backup(
         with tarfile.open(fileobj=io.BytesIO(plaintext), mode="r:gz") as archive:
             if {item.name for item in archive.getmembers()} != ARCHIVE_FILES:
                 raise BackupError("备份内容不完整")
-            database_bytes = archive.extractfile("database.sqlite3").read()
-            manifest = json.load(archive.extractfile("manifest.json"))
-            settings_key = (
-                archive.extractfile("settings_encryption_key.txt").read().decode()
-            )
-    except (AttributeError, json.JSONDecodeError, tarfile.TarError, UnicodeDecodeError) as exc:
+            database_file = archive.extractfile("database.sqlite3")
+            manifest_file = archive.extractfile("manifest.json")
+            settings_file = archive.extractfile("settings_encryption_key.txt")
+            if database_file is None or manifest_file is None or settings_file is None:
+                raise BackupError("备份内容不完整")
+            database_bytes = database_file.read()
+            manifest = json.load(manifest_file)
+            settings_key = settings_file.read().decode()
+    except (
+        AttributeError,
+        json.JSONDecodeError,
+        tarfile.TarError,
+        UnicodeDecodeError,
+    ) as exc:
         raise BackupError("备份内容无法解析") from exc
     if manifest.get("format_version") != 1:
         raise BackupError("不支持的备份格式版本")

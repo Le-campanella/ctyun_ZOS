@@ -21,8 +21,8 @@ import anyio
 from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
 
@@ -72,7 +72,6 @@ from .providers import (
 from .runtime import Runtime
 from .security import issue_delete_token, matches_delete_token
 
-
 STATUS_VALUES = {"uploading", "unknown", "succeeded", "failed"}
 LEVELS = {"NOTIFY": 25, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 SAFE_EXTENSION = re.compile(r"^[a-z0-9]{1,10}$")
@@ -85,9 +84,13 @@ def _admin_path(path: str, method: str) -> bool:
         or path == "/v1/settings/storage"
         or path.startswith("/v1/dashboard/")
         or path.startswith("/v1/admin/")
-        or path in {"/dashboard", "/dashboard/settings", "/openapi.json", "/docs", "/redoc"}
+        or path
+        in {"/dashboard", "/dashboard/settings", "/openapi.json", "/docs", "/redoc"}
         or path.startswith("/static/")
-        or (method == "GET" and (path == "/v1/upload-tasks" or path.startswith("/v1/upload-tasks/")))
+        or (
+            method == "GET"
+            and (path == "/v1/upload-tasks" or path.startswith("/v1/upload-tasks/"))
+        )
     )
 
 
@@ -101,9 +104,9 @@ def _admin_key(headers: dict[bytes, bytes]) -> str | None:
         return value
     if scheme.lower() == "basic" and value:
         try:
-            username, separator, password = base64.b64decode(
-                value, validate=True
-            ).decode("utf-8").partition(":")
+            username, separator, password = (
+                base64.b64decode(value, validate=True).decode("utf-8").partition(":")
+            )
         except (binascii.Error, UnicodeDecodeError):
             return None
         if separator and username == "admin":
@@ -222,18 +225,15 @@ class RequestGuardMiddleware:
                     receive,
                     send,
                     401,
-                    error_body(
-                        "ADMIN_AUTH_REQUIRED", "需要管理员凭证", request_id
-                    ),
+                    error_body("ADMIN_AUTH_REQUIRED", "需要管理员凭证", request_id),
                     request_id,
                     {"WWW-Authenticate": 'Basic realm="ZOS Admin"'},
                 )
                 return
-        is_upload = (
-            scope["method"] == "POST"
-            and scope["path"].rstrip("/")
-            in {"/v1/uploads", "/v1/uploads/validate"}
-        )
+        is_upload = scope["method"] == "POST" and scope["path"].rstrip("/") in {
+            "/v1/uploads",
+            "/v1/uploads/validate",
+        }
         acquired = False
         if is_upload:
             client_id = _client_identity(headers, settings)
@@ -289,9 +289,7 @@ class RequestGuardMiddleware:
             content_length = headers.get(b"content-length")
             if content_length:
                 try:
-                    too_large = (
-                        int(content_length) > settings.max_request_body_bytes
-                    )
+                    too_large = int(content_length) > settings.max_request_body_bytes
                 except ValueError:
                     too_large = True
                 if too_large:
@@ -301,9 +299,7 @@ class RequestGuardMiddleware:
                         receive,
                         send,
                         413,
-                        error_body(
-                            "FILE_TOO_LARGE", "请求体超过允许上限", request_id
-                        ),
+                        error_body("FILE_TOO_LARGE", "请求体超过允许上限", request_id),
                         request_id,
                     )
                     return
@@ -382,9 +378,7 @@ def _content_type(value: str | None) -> str:
 
 
 async def _upload_file(request: Request, runtime: Runtime):
-    if not request.headers.get("content-type", "").startswith(
-        "multipart/form-data"
-    ):
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
         raise APIError(400, "BAD_REQUEST", "上传请求必须使用 multipart/form-data")
     try:
         form = await request.form(
@@ -536,10 +530,7 @@ def _provider_status(error: ProviderError) -> int:
 def _existing_upload(
     task: dict[str, Any], requested_preset: str | None
 ) -> JSONResponse:
-    if (
-        requested_preset is not None
-        and requested_preset != task["storage_preset"]
-    ):
+    if requested_preset is not None and requested_preset != task["storage_preset"]:
         raise APIError(
             409,
             "IDEMPOTENCY_SCOPE_MISMATCH",
@@ -551,9 +542,7 @@ def _existing_upload(
         response.headers["Idempotency-Replayed"] = "true"
         return response
     code = (
-        "IDEMPOTENCY_KEY_REUSED"
-        if task["status"] == "failed"
-        else "UPLOAD_IN_PROGRESS"
+        "IDEMPOTENCY_KEY_REUSED" if task["status"] == "failed" else "UPLOAD_IN_PROGRESS"
     )
     raise APIError(
         409,
@@ -580,9 +569,7 @@ def _deleted_response(
 
 def _deletion_gate(task: dict[str, Any]) -> JSONResponse | None:
     if task["object_status"] == "deleted":
-        return _deleted_response(
-            task, already_deleted=True, already_absent=False
-        )
+        return _deleted_response(task, already_deleted=True, already_absent=False)
     if task["object_status"] in {"deleting", "delete_unknown"}:
         raise APIError(
             409,
@@ -805,9 +792,7 @@ def create_app(
             }
         return JSONResponse(body, status_code=200 if is_ready else 503)
 
-    @app.get(
-        "/v1/settings/storage/providers", response_model=ProviderSchemasResponse
-    )
+    @app.get("/v1/settings/storage/providers", response_model=ProviderSchemasResponse)
     async def provider_schemas(request: Request):
         runtime: Runtime = request.app.state.runtime
         return {"items": runtime.registry.schemas()}
@@ -818,9 +803,7 @@ def create_app(
     )
     async def storage_presets(request: Request):
         try:
-            return _no_store(
-                {"items": request.app.state.runtime.storage_presets()}
-            )
+            return _no_store({"items": request.app.state.runtime.storage_presets()})
         except sqlite3.Error as exc:
             raise APIError(500, "DATABASE_ERROR", "无法读取存储预设") from exc
 
@@ -847,9 +830,7 @@ def create_app(
         except sqlite3.IntegrityError as exc:
             raise APIError(409, "PRESET_STATE_CONFLICT", "preset_key 已存在") from exc
         except sqlite3.Error as exc:
-            raise APIError(
-                500, "SETTINGS_STORAGE_ERROR", "无法保存存储预设"
-            ) from exc
+            raise APIError(500, "SETTINGS_STORAGE_ERROR", "无法保存存储预设") from exc
         return _no_store(result, 201)
 
     @app.get(
@@ -861,9 +842,7 @@ def create_app(
         try:
             result = request.app.state.runtime.storage_preset_detail(preset_key)
         except PresetNotFound as exc:
-            raise APIError(
-                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
-            ) from exc
+            raise APIError(404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在") from exc
         except sqlite3.Error as exc:
             raise APIError(500, "DATABASE_ERROR", "无法读取存储预设") from exc
         return _no_store(result)
@@ -881,14 +860,11 @@ def create_app(
             await request.app.state.runtime.activate_storage(
                 payload.model_dump(exclude_none=True), preset_key
             )
-            result = (
-                request.app.state.runtime.storage_preset_detail(preset_key)
-                | {"previous_revision": payload.expected_revision}
-            )
+            result = request.app.state.runtime.storage_preset_detail(preset_key) | {
+                "previous_revision": payload.expected_revision
+            }
         except PresetNotFound as exc:
-            raise APIError(
-                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
-            ) from exc
+            raise APIError(404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在") from exc
         except ProviderError as exc:
             raise APIError(_provider_status(exc), exc.code, exc.message) from exc
         except RevisionConflict as exc:
@@ -913,9 +889,7 @@ def create_app(
         _settings_request(request)
         preset_key = _preset_key(preset_key)
         if payload.display_name is None and payload.enabled is None:
-            raise APIError(
-                400, "STORAGE_PRESET_INVALID", "至少提交一个可修改字段"
-            )
+            raise APIError(400, "STORAGE_PRESET_INVALID", "至少提交一个可修改字段")
         try:
             request.app.state.runtime.update_storage_preset(
                 preset_key,
@@ -925,9 +899,7 @@ def create_app(
             )
             result = request.app.state.runtime.storage_preset_detail(preset_key)
         except PresetNotFound as exc:
-            raise APIError(
-                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
-            ) from exc
+            raise APIError(404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在") from exc
         except PresetStateConflict as exc:
             raise APIError(
                 409,
@@ -958,13 +930,9 @@ def create_app(
                 payload.expected_default_preset,
                 payload.expected_state_revision,
             )
-            result = request.app.state.runtime.storage_preset_detail(
-                payload.preset_key
-            )
+            result = request.app.state.runtime.storage_preset_detail(payload.preset_key)
         except PresetNotFound as exc:
-            raise APIError(
-                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
-            ) from exc
+            raise APIError(404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在") from exc
         except DefaultPresetConflict as exc:
             raise APIError(
                 409,
@@ -972,13 +940,9 @@ def create_app(
                 f"当前默认预设为 {exc.current_default_preset}",
             ) from exc
         except ValueError as exc:
-            raise APIError(
-                409, "DEFAULT_PRESET_CONFLICT", "目标预设未启用"
-            ) from exc
+            raise APIError(409, "DEFAULT_PRESET_CONFLICT", "目标预设未启用") from exc
         except sqlite3.Error as exc:
-            raise APIError(
-                500, "SETTINGS_STORAGE_ERROR", "无法切换默认预设"
-            ) from exc
+            raise APIError(500, "SETTINGS_STORAGE_ERROR", "无法切换默认预设") from exc
         return _no_store(result)
 
     @app.get("/v1/settings/storage", response_model=StorageSettingsResponse)
@@ -991,13 +955,9 @@ def create_app(
         body = payload.model_dump(exclude_none=True)
         preset_key = body.pop("preset_key", None)
         try:
-            result = await request.app.state.runtime.test_storage(
-                body, preset_key
-            )
+            result = await request.app.state.runtime.test_storage(body, preset_key)
         except PresetNotFound as exc:
-            raise APIError(
-                404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在"
-            ) from exc
+            raise APIError(404, "STORAGE_PRESET_NOT_FOUND", "存储预设不存在") from exc
         except ProviderError as exc:
             raise APIError(_provider_status(exc), exc.code, exc.message) from exc
         return _no_store(result)
@@ -1033,9 +993,7 @@ def create_app(
             content_type = _content_type(source.content_type)
             size = await _source_size(source)
             if size > runtime.settings.max_upload_bytes:
-                raise APIError(
-                    413, "FILE_TOO_LARGE", "文件不能超过 200 MiB"
-                )
+                raise APIError(413, "FILE_TOO_LARGE", "文件不能超过 200 MiB")
             if size == 0:
                 raise APIError(400, "FILE_EMPTY", "文件不能为空")
             return {
@@ -1053,9 +1011,7 @@ def create_app(
     @app.post("/v1/uploads", response_model=UploadResponse)
     async def upload(
         request: Request,
-        x_storage_preset: str | None = Header(
-            default=None, alias="X-Storage-Preset"
-        ),
+        x_storage_preset: str | None = Header(default=None, alias="X-Storage-Preset"),
         x_client_id: str | None = Header(default=None, alias="X-Client-ID"),
         x_client_key: str | None = Header(default=None, alias="X-Client-Key"),
     ):
@@ -1078,9 +1034,7 @@ def create_app(
         try:
             snapshot = runtime.resolve_upload_snapshot(x_storage_preset)
         except ProviderError as exc:
-            raise APIError(
-                _provider_status(exc), exc.code, exc.message
-            ) from exc
+            raise APIError(_provider_status(exc), exc.code, exc.message) from exc
         provider = snapshot.provider
         form, source = await _upload_file(request, runtime)
         try:
@@ -1212,9 +1166,7 @@ def create_app(
                     finished_at=utc_now() if status == "failed" else None,
                     duration_ms=_duration(request),
                 )
-                raise APIError(
-                    502, exc.code, exc.message, task_id=task_id
-                ) from exc
+                raise APIError(502, exc.code, exc.message, task_id=task_id) from exc
             try:
                 metadata = await anyio.to_thread.run_sync(
                     provider.head_object, object_key
@@ -1307,8 +1259,10 @@ def create_app(
         except ValueError as exc:
             raise APIError(400, "BAD_REQUEST", "分页参数不合法") from exc
         status = request.query_params.get("status")
-        if not 1 <= limit <= 200 or offset < 0 or (
-            status is not None and status not in STATUS_VALUES
+        if (
+            not 1 <= limit <= 200
+            or offset < 0
+            or (status is not None and status not in STATUS_VALUES)
         ):
             raise APIError(400, "BAD_REQUEST", "任务查询参数不合法")
         from_time = _parse_time(request.query_params.get("from"), "from")
@@ -1356,9 +1310,7 @@ def create_app(
     async def delete_task_object(
         request: Request,
         task_id: str,
-        x_delete_token: str | None = Header(
-            default=None, alias="X-Delete-Token"
-        ),
+        x_delete_token: str | None = Header(default=None, alias="X-Delete-Token"),
     ):
         try:
             UUID(task_id)
@@ -1387,9 +1339,7 @@ def create_app(
                     task_id=task_id,
                 )
         else:
-            if not matches_delete_token(
-                x_delete_token, task.get("delete_token_hash")
-            ):
+            if not matches_delete_token(x_delete_token, task.get("delete_token_hash")):
                 raise APIError(
                     403,
                     "DELETE_TOKEN_INVALID",
@@ -1552,7 +1502,9 @@ def create_app(
                 provider.head_object, task["object_key"], task["version_id"]
             )
         except ProviderError:
-            return await _delete_pending(runtime, request, task, "post_delete_head_error")
+            return await _delete_pending(
+                runtime, request, task, "post_delete_head_error"
+            )
         if remaining is not None:
             if not matches_object_metadata(
                 remaining,
@@ -1782,9 +1734,7 @@ def create_app(
         if app.openapi_schema:
             return app.openapi_schema
         schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
-        schemes = schema.setdefault("components", {}).setdefault(
-            "securitySchemes", {}
-        )
+        schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
         schemes.update(
             AdminBearer={"type": "http", "scheme": "bearer"},
             AdminBasic={"type": "http", "scheme": "basic"},
@@ -1806,9 +1756,13 @@ def create_app(
         )
         for path, methods in schema["paths"].items():
             for method, operation in methods.items():
-                if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"} and _admin_path(
-                    path, method.upper()
-                ):
+                if method.upper() in {
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE",
+                } and _admin_path(path, method.upper()):
                     operation["security"] = [
                         {"AdminBearer": []},
                         {"AdminBasic": []},
@@ -1827,7 +1781,7 @@ def create_app(
         app.openapi_schema = schema
         return schema
 
-    app.openapi = secured_openapi
+    app.openapi = secured_openapi  # type: ignore[method-assign]
 
     return app
 

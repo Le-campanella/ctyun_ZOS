@@ -24,7 +24,7 @@ from .database import (
     RevisionConflict,
     utc_now,
 )
-from .eventlog import EventLogger, NOTIFY
+from .eventlog import NOTIFY, EventLogger
 from .providers import (
     ProviderError,
     ProviderRegistry,
@@ -66,9 +66,9 @@ class Runtime:
         self._active_lock = threading.RLock()
         self._snapshots_by_key: dict[str, StorageSnapshot] = {}
         self._providers_by_config_id: OrderedDict[str, StorageProvider] = OrderedDict()
-        self._recovery_providers_by_config_id: OrderedDict[
-            str, StorageProvider
-        ] = OrderedDict()
+        self._recovery_providers_by_config_id: OrderedDict[str, StorageProvider] = (
+            OrderedDict()
+        )
         self._default_preset_key: str | None = None
         self.schema_ready = False
         self.recovery_complete = False
@@ -162,9 +162,7 @@ class Runtime:
             self._default_preset_key = default
 
     @staticmethod
-    def _snapshot(
-        record: dict[str, Any], provider: StorageProvider
-    ) -> StorageSnapshot:
+    def _snapshot(record: dict[str, Any], provider: StorageProvider) -> StorageSnapshot:
         return StorageSnapshot(
             preset_id=record["preset_id"],
             preset_key=record["preset_key"],
@@ -282,9 +280,7 @@ class Runtime:
             key = preset_key if preset_key is not None else self._default_preset_key
             return self._snapshots_by_key.get(key) if key is not None else None
 
-    def resolve_upload_snapshot(
-        self, preset_key: str | None
-    ) -> StorageSnapshot:
+    def resolve_upload_snapshot(self, preset_key: str | None) -> StorageSnapshot:
         if preset_key is None:
             snapshot = self.active_snapshot()
             if snapshot is None:
@@ -402,9 +398,7 @@ class Runtime:
         items = []
         for preset in self.database.list_storage_presets():
             config_record = self.database.active_storage(preset["preset_key"])
-            config = (
-                json.loads(config_record["config_json"]) if config_record else {}
-            )
+            config = json.loads(config_record["config_json"]) if config_record else {}
             items.append(
                 {
                     "preset_key": preset["preset_key"],
@@ -459,14 +453,14 @@ class Runtime:
             raise ProviderError("STORAGE_CONFIG_INVALID", "Provider 信息不完整")
         provider_type = self.registry.get(provider_id, schema_version)
         config = payload.get("config")
+        if not isinstance(config, dict):
+            raise ProviderError("STORAGE_CONFIG_INVALID", "config 格式不合法")
         submitted = payload.get("credentials")
         if submitted is not None and not isinstance(submitted, dict):
             raise ProviderError("STORAGE_CONFIG_INVALID", "credentials 格式不合法")
         credentials = dict(submitted or {})
         active = (
-            self.database.active_storage(preset_key)
-            if inherit_credentials
-            else None
+            self.database.active_storage(preset_key) if inherit_credentials else None
         )
         if active:
             old_config = json.loads(active["config_json"])
@@ -477,9 +471,7 @@ class Runtime:
                 and old_config.get("endpoint_url") == config.get("endpoint_url")
             )
             if same_identity:
-                old_credentials = self.cipher.decrypt(
-                    active["credentials_ciphertext"]
-                )
+                old_credentials = self.cipher.decrypt(active["credentials_ciphertext"])
                 for name in ("access_key", "secret_key"):
                     if name not in credentials:
                         credentials[name] = old_credentials[name]
@@ -591,9 +583,7 @@ class Runtime:
             raise PresetNotFound(preset_key)
         expected = payload.get("expected_revision")
         if not isinstance(expected, int) or expected < 0:
-            raise ProviderError(
-                "STORAGE_CONFIG_INVALID", "expected_revision 不合法"
-            )
+            raise ProviderError("STORAGE_CONFIG_INVALID", "expected_revision 不合法")
         active = self.database.active_storage(preset_key)
         current_revision = active["revision"] if active else 0
         if expected != current_revision:
@@ -709,11 +699,15 @@ class Runtime:
     async def recover(self, initial: bool = False) -> None:
         self.recovery_complete = False
         stale_upload = (
-            datetime.now(UTC) - timedelta(seconds=self.settings.stale_upload_seconds)
-        ).isoformat().replace("+00:00", "Z")
+            (datetime.now(UTC) - timedelta(seconds=self.settings.stale_upload_seconds))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         stale_delete = (
-            datetime.now(UTC) - timedelta(seconds=self.settings.stale_delete_seconds)
-        ).isoformat().replace("+00:00", "Z")
+            (datetime.now(UTC) - timedelta(seconds=self.settings.stale_delete_seconds))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         tasks = self.database.pending_tasks(
             stale_upload, self.settings.recovery_batch_size
         )
@@ -793,6 +787,7 @@ class Runtime:
 
     async def _recover_deletion(self, task: dict[str, Any]) -> None:
         from_status = task["object_status"]
+        error_code: str | None
         try:
             provider = self.recovery_provider_for_config(task["storage_config_id"])
             metadata = await anyio.to_thread.run_sync(
@@ -882,6 +877,8 @@ class Runtime:
         storage = dict(self.last_probe)
         last_checked = storage.get("last_checked_at")
         try:
+            if not isinstance(last_checked, str):
+                raise ValueError
             age_seconds = max(
                 0,
                 round(
@@ -903,8 +900,12 @@ class Runtime:
             storage["status"] = "degraded"
             storage["error_code"] = "STORAGE_PROBE_STALE"
         now = datetime.now(UTC)
-        stale_upload = (now - timedelta(seconds=self.settings.stale_upload_seconds)).isoformat()
-        stale_delete = (now - timedelta(seconds=self.settings.stale_delete_seconds)).isoformat()
+        stale_upload = (
+            now - timedelta(seconds=self.settings.stale_upload_seconds)
+        ).isoformat()
+        stale_delete = (
+            now - timedelta(seconds=self.settings.stale_delete_seconds)
+        ).isoformat()
         try:
             backlog = self.database.recovery_backlog(stale_upload, stale_delete)
             backlog_ok = True
@@ -931,9 +932,7 @@ class Runtime:
         except (AttributeError, TypeError, ValueError):
             backlog["oldest_age_seconds"] = None
         recovery_ok = (
-            self.recovery_complete
-            and backlog_ok
-            and backlog["pending_tasks"] == 0
+            self.recovery_complete and backlog_ok and backlog["pending_tasks"] == 0
         )
         event_log = {
             "status": "degraded" if self.log.degraded else "ok",
@@ -959,7 +958,11 @@ class Runtime:
             },
             "schema": {"status": "ok" if self.schema_ready else "pending"},
             "recovery": {
-                "status": "ok" if recovery_ok else "degraded" if self.recovery_complete else "pending",
+                "status": "ok"
+                if recovery_ok
+                else "degraded"
+                if self.recovery_complete
+                else "pending",
                 "completed": self.recovery_complete,
                 "last_success_at": self.last_recovery_success_at,
                 **backlog,
