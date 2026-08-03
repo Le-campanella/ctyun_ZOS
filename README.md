@@ -11,10 +11,10 @@
 - 内置 Provider 包括 `ctyun_zos` 和 `s3_compatible`。后者适用于支持 S3 API、HeadObject、DeleteObject 和 `public-read` ACL 的其他对象存储服务；不声称兼容所有厂商私有协议。
 - `DELETE /v1/upload-tasks/{task_id}/object` 已开放严格删除：只接受任务级 `X-Delete-Token`，使用任务原配置校验对象元数据、精确删除 VersionId 并再次确认对象不存在。
 - 后台探测、恢复和维护任务由 supervisor 自动重试；任一后台任务异常时 `/readyz` 降级并记录 CRITICAL 日志。
-- [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 已同步当前仓库；服务器尚未部署本提交时，以服务器自身的 OpenAPI 为准。
-- 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
+- [docs/current/API.md](docs/current/API.md) v3 与 [docs/current/PLAN.md](docs/current/PLAN.md) v6 已同步当前仓库；服务器尚未部署本提交时，以服务器自身的 OpenAPI 为准。
+- 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约，并与 [OpenAPI 快照](docs/current/openapi.json) 由 CI 精确校验。
 
-实施记录见 [WORKLOG.md](WORKLOG.md)，外部审查与实施建议见 [docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md](docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md)。
+当前实施记录见 [WORKLOG.md](WORKLOG.md)，完整文档索引见 [docs/README.md](docs/README.md)。
 
 ## 启动
 
