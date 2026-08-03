@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import socket
+from ipaddress import ip_address, ip_network
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from time import monotonic
@@ -23,6 +24,7 @@ from .config import Settings
 
 
 BUCKET_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")
+ALWAYS_BLOCKED_ENDPOINTS = {ip_address("169.254.169.254")}
 
 
 class ProviderError(Exception):
@@ -46,6 +48,57 @@ class ObjectMetadata:
     version_id: str | None
     content_type: str | None
     last_modified: str | None
+
+
+def validate_endpoint_access(endpoint_url: str, settings: Settings) -> None:
+    parsed = urlsplit(endpoint_url)
+    host = parsed.hostname
+    if not host or parsed.scheme not in {"http", "https"}:
+        raise ProviderError("STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 格式不合法")
+    if parsed.scheme != "https" and not settings.allow_insecure_storage_http:
+        raise ProviderError("STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 必须使用 HTTPS")
+    host_rules: list[str] = []
+    networks = []
+    for rule in settings.storage_endpoint_allowlist:
+        try:
+            networks.append(ip_network(rule, strict=False))
+        except ValueError:
+            host_rules.append(rule.lower())
+    host_match = any(
+        host.lower() == rule
+        or (rule.startswith(".") and host.lower().endswith(rule))
+        for rule in host_rules
+    )
+    try:
+        addresses = {ip_address(host)}
+    except ValueError:
+        try:
+            addresses = {
+                ip_address(item[4][0])
+                for item in socket.getaddrinfo(host, parsed.port or 443)
+            }
+        except socket.gaierror as exc:
+            raise ProviderError(
+                "STORAGE_ENDPOINT_UNREACHABLE", "无法解析 Storage Endpoint"
+            ) from exc
+    for address in addresses:
+        network_match = any(address in network for network in networks)
+        if (
+            address in ALWAYS_BLOCKED_ENDPOINTS
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            raise ProviderError("STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 地址被禁止")
+        if address.is_private and not network_match:
+            raise ProviderError(
+                "STORAGE_ENDPOINT_FORBIDDEN", "私网 Storage Endpoint 未进入 allowlist"
+            )
+        if not host_match and not network_match:
+            raise ProviderError(
+                "STORAGE_ENDPOINT_FORBIDDEN", "Storage Endpoint 未进入 allowlist"
+            )
 
 
 def require_upload_metadata(metadata: ObjectMetadata, expected_size: int) -> None:

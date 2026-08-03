@@ -25,9 +25,16 @@ def _boolean(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _csv(name: str, default: str = "") -> tuple[str, ...]:
+    return tuple(item.strip() for item in os.getenv(name, default).split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     encryption_key: str
+    admin_api_keys: tuple[str, ...] = ()
+    storage_endpoint_allowlist: tuple[str, ...] = (".zos.ctyun.cn",)
+    allow_insecure_storage_http: bool = False
     database_path: Path = Path("/data/db/zos-upload.db")
     temp_dir: Path = Path("/data/tmp")
     app_timezone: str = "Asia/Shanghai"
@@ -56,6 +63,14 @@ class Settings:
     def __post_init__(self) -> None:
         if not self.encryption_key:
             raise ValueError("SETTINGS_ENCRYPTION_KEY is required")
+        if not self.admin_api_keys:
+            raise ValueError("ADMIN_API_KEYS must contain at least one key")
+        if len(set(self.admin_api_keys)) != len(self.admin_api_keys) or any(
+            len(key) < 32 for key in self.admin_api_keys
+        ):
+            raise ValueError("ADMIN_API_KEYS must contain unique keys of at least 32 characters")
+        if not self.storage_endpoint_allowlist:
+            raise ValueError("STORAGE_ENDPOINT_ALLOWLIST must not be empty")
         if self.max_request_body_bytes <= self.max_upload_bytes:
             raise ValueError("MAX_REQUEST_BODY_BYTES must exceed MAX_UPLOAD_BYTES")
         ZoneInfo(self.app_timezone)
@@ -64,6 +79,13 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             encryption_key=os.getenv("SETTINGS_ENCRYPTION_KEY", ""),
+            admin_api_keys=_csv("ADMIN_API_KEYS"),
+            storage_endpoint_allowlist=_csv(
+                "STORAGE_ENDPOINT_ALLOWLIST", ".zos.ctyun.cn"
+            ),
+            allow_insecure_storage_http=_boolean(
+                "ALLOW_INSECURE_STORAGE_HTTP", False
+            ),
             database_path=Path(os.getenv("DATABASE_PATH", "/data/db/zos-upload.db")),
             temp_dir=Path(os.getenv("TEMP_DIR", "/data/tmp")),
             app_timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai"),

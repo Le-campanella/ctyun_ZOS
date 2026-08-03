@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import re
+import secrets
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -15,6 +18,7 @@ from zoneinfo import ZoneInfo
 import anyio
 from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -70,6 +74,46 @@ STATUS_VALUES = {"uploading", "unknown", "succeeded", "failed"}
 LEVELS = {"NOTIFY": 25, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 SAFE_EXTENSION = re.compile(r"^[a-z0-9]{1,10}$")
 SAFE_PRESET_KEY = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+
+
+def _admin_path(path: str, method: str) -> bool:
+    return (
+        path.startswith("/v1/settings/")
+        or path == "/v1/settings/storage"
+        or path.startswith("/v1/dashboard/")
+        or path.startswith("/v1/admin/")
+        or path in {"/dashboard", "/dashboard/settings", "/openapi.json", "/docs", "/redoc"}
+        or path.startswith("/static/")
+        or (method == "GET" and (path == "/v1/upload-tasks" or path.startswith("/v1/upload-tasks/")))
+    )
+
+
+def _admin_key(headers: dict[bytes, bytes]) -> str | None:
+    direct = headers.get(b"x-admin-key")
+    if direct:
+        return direct.decode("latin1")
+    authorization = headers.get(b"authorization", b"").decode("latin1")
+    scheme, _, value = authorization.partition(" ")
+    if scheme.lower() == "bearer" and value:
+        return value
+    if scheme.lower() == "basic" and value:
+        try:
+            username, separator, password = base64.b64decode(
+                value, validate=True
+            ).decode("utf-8").partition(":")
+        except (binascii.Error, UnicodeDecodeError):
+            return None
+        if separator and username == "admin":
+            return password
+    return None
+
+
+def _valid_admin_key(supplied: str | None, expected: tuple[str, ...]) -> bool:
+    candidate = supplied or ""
+    matched = False
+    for key in expected:
+        matched |= secrets.compare_digest(candidate, key)
+    return matched
 
 
 class APIError(Exception):
@@ -137,6 +181,21 @@ class RequestGuardMiddleware:
             return
         scope.setdefault("state", {})["request_id"] = request_id
         scope["state"]["started_at"] = monotonic()
+        settings = self.settings()
+        if _admin_path(scope["path"].rstrip("/") or "/", scope["method"]):
+            if not _valid_admin_key(_admin_key(headers), settings.admin_api_keys):
+                await self._response(
+                    scope,
+                    receive,
+                    send,
+                    401,
+                    error_body(
+                        "ADMIN_AUTH_REQUIRED", "需要管理员凭证", request_id
+                    ),
+                    request_id,
+                    {"WWW-Authenticate": 'Basic realm="ZOS Admin"'},
+                )
+                return
         is_upload = (
             scope["method"] == "POST"
             and scope["path"].rstrip("/")
@@ -144,7 +203,6 @@ class RequestGuardMiddleware:
         )
         acquired = False
         if is_upload:
-            settings = self.settings()
             if self.active_uploads >= settings.max_concurrent_uploads:
                 await self._response(
                     scope,
@@ -379,7 +437,11 @@ def _provider_status(error: ProviderError) -> int:
         return 404
     if error.code == "STORAGE_PRESET_DISABLED":
         return 409
-    if error.code in {"STORAGE_CONFIG_INVALID", "STORAGE_CREDENTIALS_REQUIRED"}:
+    if error.code in {
+        "STORAGE_CONFIG_INVALID",
+        "STORAGE_CREDENTIALS_REQUIRED",
+        "STORAGE_ENDPOINT_FORBIDDEN",
+    }:
         return 400
     if error.code in {
         "STORAGE_DEFAULT_NOT_CONFIGURED",
@@ -595,6 +657,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=web_root / "static"), name="static")
     guard_settings = Settings(
         encryption_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+        admin_api_keys=("guard-admin-key-0000000000000000",),
     )
     app.add_middleware(
         RequestGuardMiddleware, settings=lambda: resolved or guard_settings
@@ -1187,6 +1250,10 @@ def create_app(
         return _task_item(task, detail=True)
 
     @app.delete(
+        "/v1/admin/upload-tasks/{task_id}/object",
+        response_model=DeleteObjectResponse,
+    )
+    @app.delete(
         "/v1/upload-tasks/{task_id}/object",
         response_model=DeleteObjectResponse,
     )
@@ -1209,22 +1276,40 @@ def create_app(
         task = runtime.database.task_by_id(task_id)
         if task is None:
             raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
-        if not matches_delete_token(
-            x_delete_token, task.get("delete_token_hash")
-        ):
-            raise APIError(
-                403,
-                "DELETE_TOKEN_INVALID",
-                "删除凭证无效",
-                task_id=task_id,
-            )
-        existing = _deletion_gate(task)
-        if existing:
-            return existing
+        admin_cleanup = request.url.path.startswith("/v1/admin/")
+        deletable_status = "present_unclaimed" if admin_cleanup else "present"
+        if admin_cleanup:
+            if (
+                task["status"] != "succeeded"
+                or task["object_status"] != "present_unclaimed"
+                or task.get("delete_token_hash") is not None
+            ):
+                raise APIError(
+                    409,
+                    "OBJECT_NOT_UNCLAIMED",
+                    "任务不是可管理清理的无凭证对象",
+                    task_id=task_id,
+                )
+        else:
+            if not matches_delete_token(
+                x_delete_token, task.get("delete_token_hash")
+            ):
+                raise APIError(
+                    403,
+                    "DELETE_TOKEN_INVALID",
+                    "删除凭证无效",
+                    task_id=task_id,
+                )
+            existing = _deletion_gate(task)
+            if existing:
+                return existing
         try:
-            claimed = runtime.database.claim_task_deletion(
-                task_id, _request_id(request), utc_now()
+            claim = (
+                runtime.database.claim_unclaimed_deletion
+                if admin_cleanup
+                else runtime.database.claim_task_deletion
             )
+            claimed = claim(task_id, _request_id(request), utc_now())
         except sqlite3.Error as exc:
             raise APIError(
                 500,
@@ -1236,6 +1321,13 @@ def create_app(
             current = runtime.database.task_by_id(task_id)
             if current is None:
                 raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
+            if admin_cleanup:
+                raise APIError(
+                    409,
+                    "OBJECT_NOT_UNCLAIMED",
+                    "无凭证对象状态已改变",
+                    task_id=task_id,
+                )
             result = _deletion_gate(current)
             if result:
                 return result
@@ -1252,7 +1344,7 @@ def create_app(
             request_id=_request_id(request),
             task_id=task_id,
             details={
-                "from_status": "present",
+                "from_status": deletable_status,
                 "to_status": "deleting",
                 "provider_result": None,
                 "object_key": task["object_key"],
@@ -1270,7 +1362,7 @@ def create_app(
                 _request_id(request),
                 task,
                 "config_unavailable",
-                object_status="present",
+                object_status=deletable_status,
                 delete_error_code="STORAGE_CONFIG_UNAVAILABLE",
             )
             raise APIError(
@@ -1291,7 +1383,7 @@ def create_app(
                 _request_id(request),
                 task,
                 exc.code,
-                object_status="present",
+                object_status=deletable_status,
                 delete_error_code="DELETE_FAILED",
             )
             raise APIError(
@@ -1327,7 +1419,7 @@ def create_app(
                 _request_id(request),
                 task,
                 "metadata_mismatch",
-                object_status="present",
+                object_status=deletable_status,
                 delete_error_code="OBJECT_CHANGED",
             )
             raise APIError(
@@ -1348,7 +1440,7 @@ def create_app(
                 _request_id(request),
                 task,
                 exc.code,
-                object_status="present",
+                object_status=deletable_status,
                 delete_error_code="DELETE_FAILED",
             )
             raise APIError(
@@ -1378,7 +1470,7 @@ def create_app(
                 _request_id(request),
                 task,
                 "still_present",
-                object_status="present",
+                object_status=deletable_status,
                 delete_error_code="DELETE_FAILED",
             )
             raise APIError(
@@ -1566,6 +1658,37 @@ def create_app(
         response = templates.TemplateResponse(request, "settings.html")
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    def secured_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+        schemes = schema.setdefault("components", {}).setdefault(
+            "securitySchemes", {}
+        )
+        schemes.update(
+            AdminBearer={"type": "http", "scheme": "bearer"},
+            AdminBasic={"type": "http", "scheme": "basic"},
+            AdminKeyHeader={
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Admin-Key",
+            },
+        )
+        for path, methods in schema["paths"].items():
+            for method, operation in methods.items():
+                if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"} and _admin_path(
+                    path, method.upper()
+                ):
+                    operation["security"] = [
+                        {"AdminBearer": []},
+                        {"AdminBasic": []},
+                        {"AdminKeyHeader": []},
+                    ]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = secured_openapi
 
     return app
 

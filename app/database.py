@@ -956,6 +956,23 @@ class Database:
             )
             return cursor.rowcount == 1
 
+    def claim_unclaimed_deletion(
+        self, task_id: str, request_id: str, started_at: str
+    ) -> bool:
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE upload_tasks
+                SET object_status='deleting', delete_request_id=?,
+                    delete_error_code=NULL, delete_started_at=?, deleted_at=NULL
+                WHERE id=? AND status='succeeded'
+                  AND object_status='present_unclaimed'
+                  AND delete_token_hash IS NULL
+                """,
+                (request_id, started_at, task_id),
+            )
+            return cursor.rowcount == 1
+
     def task_by_id(self, task_id: str) -> dict[str, Any] | None:
         with closing(self.connect()) as connection:
             row = connection.execute(

@@ -4,7 +4,7 @@
 >
 > 完整调用方与 Dashboard 接口契约见 [API.md](API.md)。本文与 `API.md` 已完成同步。
 >
-> 实现进度（2026-07-31）：契约冻结、SQLite schema v1→v2→v3 迁移、上传对象元数据确认、一次性删除凭证、多预设与上传路由、严格 DELETE、删除恢复与永久审计、Dashboard v3 已完成。
+> 实现进度（2026-08-03）：SQLite schema v4 状态完整性、管理员控制面认证、Endpoint allowlist、无凭证对象管理清理，以及既有多预设、严格删除、恢复与 Dashboard 已完成。
 
 ## 1. 目标
 
@@ -27,14 +27,14 @@
 
 - 服务仅发布到受控局域网地址或容器内部网络。
 - API 与 Dashboard 共用同一个局域网端口。
-- 服务不设置统一的调用方认证、登录、用户、角色或权限系统。
+- 上传数据面不要求统一调用方身份；Dashboard、设置、日志、OpenAPI 和完整任务查询要求管理员密钥。
 - 对象删除是例外的破坏性操作，必须同时提供任务 ID 和上传成功时返回的对象级 `delete_token`；该 token 是持有者凭证，不代替未来的统一服务认证。
-- 局域网内能够访问该端口的客户端可以读取监控信息、选择任意启用的存储预设，也可以修改存储设置。
+- 只有持有管理员密钥的客户端可以读取监控与完整任务信息或修改存储设置。
 - 局域网、防火墙、交换机 VLAN 和部署平台的端口暴露规则构成访问边界。
 - 部署配置禁止公网入口、端口转发和公有负载均衡器。
 - CORS 默认关闭，Dashboard 通过同源接口读写设置。
-- 设置写接口只接受 JSON 和自定义 Header，用于降低浏览器跨站误提交风险；该机制不承担身份认证。
-- 设置请求会传输 AK/SK。正式部署应通过内网 HTTPS 暴露 Dashboard 与设置 API，或将其限制在隔离的管理 VLAN / 管理主机；使用 HTTP 时，能够监听局域网流量的设备也属于信任边界。服务仍保持无身份认证。
+- 设置写接口同时要求管理员认证、JSON、自定义 Header、同源检查和 revision 乐观锁。
+- 设置请求会传输 AK/SK。管理员认证不替代内网 HTTPS 或隔离管理网络提供的传输保护。
 
 ### 2.2 服务管理范围
 
@@ -621,7 +621,7 @@ PUT  /v1/settings/storage
 - 原 `GET/PUT /v1/settings/storage` 保留为默认预设的兼容别名；数据库为空时，首次 PUT 创建 `default` 预设。
 - 测试接口不持久化数据，可通过 `preset_key` 复用该预设已保存的凭证。
 - `POST`、`PUT` 和 `PATCH` 必须使用 `application/json` 并携带 `X-Settings-Request: true`。
-- 设置接口无身份认证，访问边界仍由局域网和端口暴露规则提供。
+- 设置接口要求 `ADMIN_API_KEYS` 管理员认证，并继续保留同源与自定义 Header 防护。
 
 所有响应时间字段使用 UTC ISO 8601。Dashboard 按 `APP_TIMEZONE` 显示。
 
@@ -642,7 +642,7 @@ GET /dashboard
 GET /dashboard/settings
 ```
 
-Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区域为只读，设置页面可以管理多个存储预设。
+Dashboard 与 API 同源，使用浏览器原生 HTTP Basic 管理员认证和本地静态资源。监控区域为只读，设置页面可以管理多个存储预设。
 
 ### 11.2 监控页面内容
 
@@ -711,7 +711,7 @@ Dashboard 与 API 同源、无登录，并使用本地静态资源。监控区�
 - “测试连接”和“保存并激活新 revision”两个操作。
 - 当 `public_base_url` 为空时，页面可根据 Bucket 与外网 Endpoint 建议 `https://{bucket}.{endpoint-host}`，用户仍可改为控制台显示的 Bucket 外网访问域名、CDN 或自定义域名。
 
-保存前显示目标 Endpoint、Bucket 和新 revision 的确认信息。任何局域网客户端只要可以访问该服务端口，就可以执行这些设置操作。
+保存前显示目标 Endpoint、Bucket 和新 revision 的确认信息。只有持有管理员密钥的客户端可以执行设置操作。
 
 ### 11.4 刷新策略
 
@@ -1116,7 +1116,7 @@ enable_bucket_metrics
 ## 18. 部署
 
 - 单 Docker 容器运行 FastAPI、Dashboard 和维护协程。
-- 正式局域网部署在服务前使用内网 HTTPS 反向代理，或仅允许隔离管理网络访问设置页；反向代理、应用访问日志和 APM 均禁止记录设置请求体。该部署不增加应用层身份认证。
+- 正式局域网部署继续使用内网 HTTPS 反向代理或隔离管理网络；应用层管理员认证默认启用，代理、访问日志和 APM 均禁止记录凭证与设置请求体。
 - SQLite 目录和 `TEMP_DIR` 分别挂载。
 - `SETTINGS_ENCRYPTION_KEY` 通过容器 Secret 注入并单独备份。
 - 容器端口只绑定局域网 IP 或内部 Docker 网络。
@@ -1223,7 +1223,7 @@ enable_bucket_metrics
 - 上传 API 保持 Provider 无关，后续新增其他对象存储 adapter 时调用方契约不变。
 - 配置切换使用不可变 revision，在途上传和恢复任务可以定位原配置。
 - SQLite 在并发上传、Dashboard 轮询和设置切换下保持稳定。
-- 服务、API 和 Dashboard 只在受控局域网暴露，无调用方认证。
+- 服务只在受控局域网暴露；上传数据面保持兼容，管理控制面要求管理员认证。
 - AK/SK 只以加密形式持久化，不暴露给调用方、日志、页面或 GET 响应。
 
 ## 21. 实施顺序
@@ -1247,10 +1247,10 @@ enable_bucket_metrics
 
 ## 22. 已确认决策
 
-1. 服务只在受控局域网运行，不设置调用方认证。
+1. 服务只在受控局域网运行；上传数据面不要求调用方认证，管理控制面要求管理员密钥。
 2. API 与 Dashboard 共用 FastAPI 服务和同一局域网端口。
 3. Dashboard 监控区域只读，设置页面可以管理多个 storage preset。
-4. 局域网内能够访问服务端口的客户端均可执行设置操作。
+4. 只有持有管理员密钥的客户端可以执行设置、日志、Dashboard 和完整任务查询操作。
 5. 上传调用方 API 保持 Provider 无关；第一版只实现 `ctyun_zos` adapter。
 6. ZOS 设置至少包含 SDK Endpoint、Bucket、public base URL、AK 和 SK；Endpoint 与对象访问根地址分别保存。
 7. 存储设置采用 Provider-neutral envelope 和通用 JSON 持久化，新增 Provider 不改变上传 API 或 `storage_configs` 表结构。

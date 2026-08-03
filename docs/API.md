@@ -3,7 +3,7 @@ status: unreleased
 target_version: v3
 implementation_baseline: API v1
 database_schema: v4
-implementation_status: upload_state_integrity_ready
+implementation_status: admin_control_plane_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
@@ -26,7 +26,7 @@ implementation_status: upload_state_integrity_ready
 4. 使用可选 `Idempotency-Key` 避免调用方超时后产生重复对象。
 5. 返回进程健康状态和服务就绪状态。
 6. 提供上传统计、流量时间序列、`NOTIFY` 及以上日志和可选 Storage Provider 原生指标；第一版为 ZOS Bucket 指标。
-7. 提供同源、无登录的 Web Dashboard，其中监控区域只读展示预设、对象与删除状态，设置页面可以管理多个存储预设。
+7. 提供受管理员密钥保护的同源 Web Dashboard，其中监控区域只读展示预设、对象与删除状态，设置页面可以管理多个存储预设。
 8. 提供 Provider 类型、多个独立存储服务预设、默认项、连接测试和配置 revision API；内置天翼云 ZOS 与通用 S3 兼容 Provider。
 9. 提供不会上传对象存储、不会创建任务记录的局域网文件接收测试。
 10. 使用上传成功时返回的对象级删除凭证，严格删除该任务创建的对象并保留审计记录。
@@ -38,15 +38,18 @@ implementation_status: upload_state_integrity_ready
 - 示例地址：`http://zos-upload-service:8000`
 - 服务仅部署在受控局域网地址或内部容器网络。
 - API 与 Dashboard 共用同一个局域网端口。
-- 服务不设置统一调用方认证、登录、用户、角色或权限系统。
+- 普通上传、接收验证、健康检查和持有 token 的严格删除维持局域网数据面调用方式。
+- Dashboard、静态资源、设置、日志、OpenAPI、任务列表与完整详情要求管理员凭证。
 - 删除是破坏性操作，除受控局域网边界外还必须提供上传成功响应中的任务级 `delete_token`。
 - 防火墙、VLAN、容器网络和端口暴露规则构成访问边界。
 - 部署配置关闭公网入口、端口转发和公有负载均衡器。
 - CORS 默认关闭，Dashboard 通过同源请求读写数据。
 - Dashboard 监控 API 使用 `GET`；存储设置使用 `GET`、`POST`、`PUT` 和 `PATCH`。
-- 设置 API 不设身份认证。局域网内能够访问服务端口的客户端均可选择任意启用预设，并可修改全部存储预设。
+- 管理请求接受 `Authorization: Bearer <key>`、`X-Admin-Key: <key>` 或浏览器原生 HTTP Basic（用户名 `admin`）。
+- `ADMIN_API_KEYS` 支持逗号分隔的新旧 key 并行轮换；每个 key 至少 32 字符，错误凭证返回 `401 ADMIN_AUTH_REQUIRED`。
 - 设置写请求只接受 JSON，并要求自定义 Header `X-Settings-Request: true`，用于降低浏览器跨站误提交风险。
-- 设置请求会传输 AK/SK。正式部署应通过内网 HTTPS 暴露 Dashboard 与设置 API，或将其限制在隔离的管理 VLAN / 管理主机；使用 HTTP 时，能够监听局域网流量的设备也属于信任边界。服务仍保持无身份认证。
+- 设置请求会传输 AK/SK。正式部署仍应通过内网 HTTPS 或隔离管理网络保护传输链路。
+- Storage Endpoint 必须匹配 `STORAGE_ENDPOINT_ALLOWLIST`；解析后的 loopback、link-local、metadata 和未授权私网地址会被拒绝，HTTP 默认禁用。
 - `delete_token` 是持有者凭证，正式部署必须使用内网 HTTPS；反向代理、APM 和访问日志不得记录 `X-Delete-Token`。
 
 ## 3. 通用协议约定
@@ -117,6 +120,7 @@ X-Request-ID: optional-request-id
 ```http
 Content-Type: application/json
 X-Settings-Request: true
+Authorization: Bearer <admin-key>
 ```
 
 规则：
@@ -633,6 +637,17 @@ Content-Type: application/json
 | 502 | `DELETE_FAILED` | Provider 明确拒绝删除 |
 | 503 | `STORAGE_CONFIG_UNAVAILABLE` | 任务原配置无法加载、解密或对应 Provider 已不可用 |
 
+### 7.7 管理清理无删除凭证对象
+
+仅管理员可以清理 `present_unclaimed`：
+
+```http
+DELETE /v1/admin/upload-tasks/{task_id}/object
+Authorization: Bearer <admin-key>
+```
+
+该接口不接受 `X-Delete-Token`、Bucket、Key 或 URL。服务只允许 `succeeded + present_unclaimed + delete_token_hash IS NULL`，继续使用任务原配置、大小、ETag 和 VersionId 执行与普通严格删除相同的前后校验、精确删除、恢复语义和永久审计。其他状态返回 `409 OBJECT_NOT_UNCLAIMED`。
+
 ## 8. 健康检查
 
 ### 8.1 进程健康
@@ -796,7 +811,7 @@ Content-Type: text/html; charset=utf-8
 页面特性：
 
 - 与 API 同源。
-- 无登录。
+- 使用浏览器原生 HTTP Basic；用户名固定为 `admin`，密码为当前管理员 key，凭证不进入页面 DOM 或浏览器业务存储。
 - 监控区域只读。
 - 静态资源全部打包在服务镜像中。
 - 页面不加载公网 CDN、远程字体或第三方脚本。
@@ -820,7 +835,7 @@ Host: zos-upload-service:8000
 - “测试连接”和“保存并激活”操作。
 - 当 `public_base_url` 为空时，页面可根据 Bucket 与外网 Endpoint 建议 `https://{bucket}.{endpoint-host}`；用户可以改为控制台显示的 Bucket 外网访问域名、CDN 或自定义域名。
 
-AK/SK 输入框使用密码类型并关闭自动填充，页面加载时不回填原值，浏览器本地存储中不保存凭证。测试或保存完成后清空输入值。局域网内能够访问该页面和设置 API 的客户端均可修改配置。
+AK/SK 输入框使用密码类型并关闭自动填充，页面加载时不回填原值，浏览器本地存储中不保存凭证。测试或保存完成后清空输入值。只有持有管理员 key 的客户端可以读取或修改配置。
 
 ## 10. Dashboard 存储设置
 
@@ -1116,7 +1131,7 @@ Host: zos-upload-service:8000
 
 | 字段 | 类型 | 必填 | 约束与含义 |
 |---|---|---:|---|
-| `endpoint_url` | string | 是 | SDK 上传接口地址，即 ZOS 地域 Endpoint 或内网 Endpoint；只允许 `http`、`https`，禁止 userinfo、query、fragment，路径只允许为空或 `/` |
+| `endpoint_url` | string | 是 | SDK 上传接口地址；默认只允许 HTTPS，禁止 userinfo、query、fragment 和非根路径，并必须匹配服务端 Endpoint allowlist |
 | `bucket` | string | 是 | 3 至 63 个字符，小写字母、数字和中划线，首尾不能为中划线 |
 | `public_base_url` | string | 是 | 对象访问根地址；只允许 `http`、`https`，禁止 userinfo、query、fragment；允许路径前缀，保存时去除末尾 `/` |
 | `connect_timeout_seconds` | integer | 是 | `1` 至 `60` |
@@ -1321,6 +1336,8 @@ X-Settings-Request: true
 |---:|---|---|
 | 400 | `STORAGE_CONFIG_INVALID` | Provider、schema version、URL、Bucket、凭证格式或连接参数不合法 |
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/schema version/Endpoint 变化时缺少完整 AK/SK |
+| 400 | `STORAGE_ENDPOINT_FORBIDDEN` | Endpoint 未进入 allowlist、协议不安全或解析到被禁止地址 |
+| 401 | `ADMIN_AUTH_REQUIRED` | 管理员凭证缺失或错误 |
 | 400 | `STORAGE_PRESET_INVALID` | `preset_key` 格式不合法 |
 | 404 | `STORAGE_PRESET_NOT_FOUND` | 指定预设不存在 |
 | 409 | `CONFIG_REVISION_CONFLICT` | `expected_revision` 已过期 |
@@ -1880,7 +1897,7 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - 收到 `503 UPLOAD_CAPACITY_EXCEEDED`：遵循 `Retry-After`。
 - 客户端等待响应时发生网络超时：使用相同幂等键重新请求，或先查询已知 `task_id`。
 - 未使用幂等键的自动重试会产生重复对象风险。
-- 首次 `201` 响应丢失时，幂等重放可以恢复 URL 和对象元数据，但不能恢复删除凭证；在统一内部认证或受控管理恢复能力实现前，该对象不能通过公开删除 API 删除。
+- 首次 `201` 响应丢失时，幂等重放可以恢复 URL 和对象元数据，但不能恢复删除凭证；恢复任务进入 `present_unclaimed`，只能由管理员清理。
 - 删除接口按任务状态天然幂等，不使用 `Idempotency-Key`；网络超时后使用相同任务 ID 和 `delete_token` 重试或查询任务详情。
 - 删除返回 `202 DELETE_PENDING` 时停止主动重试 Provider 调用，轮询任务详情等待 `object_status` 变为 `deleted` 或 `present`。
 
@@ -1894,6 +1911,8 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 400 | `STORAGE_PRESET_INVALID` | `preset_key` 或 `X-Storage-Preset` 格式不合法 |
 | 400 | `STORAGE_CONFIG_INVALID` | Provider、schema version、设置字段、URL、Bucket、凭证格式或参数不合法 |
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/schema version/Endpoint 变化时缺少完整 AK/SK |
+| 400 | `STORAGE_ENDPOINT_FORBIDDEN` | Endpoint 未进入 allowlist、协议不安全或解析到被禁止地址 |
+| 401 | `ADMIN_AUTH_REQUIRED` | 管理员凭证缺失或错误 |
 | 403 | `DELETE_TOKEN_INVALID` | 删除凭证缺失、错误或与任务不匹配 |
 | 404 | `TASK_NOT_FOUND` | 指定任务不存在 |
 | 404 | `STORAGE_PRESET_NOT_FOUND` | 指定存储预设不存在 |
@@ -1905,6 +1924,7 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 409 | `UPLOAD_IN_PROGRESS` | 幂等键对应任务仍在处理或待确认 |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | 幂等键已经绑定失败任务 |
 | 409 | `OBJECT_NOT_DELETABLE` | 任务或对象状态不允许严格删除 |
+| 409 | `OBJECT_NOT_UNCLAIMED` | 管理清理目标不是无凭证对象 |
 | 409 | `OBJECT_CHANGED` | 删除前对象元数据与上传记录不一致 |
 | 409 | `DELETE_IN_PROGRESS` | 对象正在删除或等待确认 |
 | 413 | `FILE_TOO_LARGE` | 文件或请求体超过上限 |

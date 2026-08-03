@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
@@ -22,6 +23,8 @@ from app.providers import (
     StorageProvider,
 )
 from app.security import hash_delete_token
+
+ADMIN_AUTH = "Bearer test-admin-key-000000000000000000"
 
 
 class FakeProvider(StorageProvider):
@@ -147,6 +150,7 @@ def client(settings, database, registry):
         settings=settings, registry=registry, database=database, background=False
     )
     with TestClient(app, raise_server_exceptions=False) as test_client:
+        test_client.headers["Authorization"] = ADMIN_AUTH
         yield test_client
 
 
@@ -163,7 +167,7 @@ def storage_payload(
         "provider_schema_version": 1,
         "expected_revision": revision,
         "config": {
-            "endpoint_url": "https://storage.internal",
+            "endpoint_url": "https://192.0.2.10",
             "public_base_url": "https://files.example",
             "fail_upload": fail_upload,
             "fail_test": fail_test,
@@ -178,7 +182,7 @@ def storage_payload(
 def activate(client: TestClient, **kwargs):
     response = client.put(
         "/v1/settings/storage",
-        headers={"X-Settings-Request": "true"},
+        headers={"X-Settings-Request": "true", "Authorization": ADMIN_AUTH},
         json=storage_payload(**kwargs),
     )
     assert response.status_code == 200, response.text
@@ -191,6 +195,49 @@ def test_unconfigured_service_still_serves_health_settings_and_dashboard(client)
     assert ready.status_code == 503
     assert ready.json()["error"]["code"] == "STORAGE_NOT_CONFIGURED"
     assert client.get("/v1/settings/storage").json()["configured"] is False
+
+
+def test_admin_routes_require_key_while_upload_data_plane_stays_open(client):
+    authorization = client.headers.pop("Authorization")
+    try:
+        assert client.get("/healthz").status_code == 200
+        assert client.post(
+            "/v1/uploads/validate", files={"file": ("test.bin", b"payload")}
+        ).status_code == 200
+        for path in (
+            "/v1/settings/storage",
+            "/v1/upload-tasks",
+            "/v1/dashboard/logs",
+            "/dashboard",
+        ):
+            response = client.get(path)
+            assert response.status_code == 401
+            assert response.json()["error"]["code"] == "ADMIN_AUTH_REQUIRED"
+        wrong = client.get(
+            "/v1/settings/storage",
+            headers={"Authorization": "Bearer " + "x" * 32},
+        )
+        assert wrong.status_code == 401
+        basic = base64.b64encode(
+            b"admin:test-admin-key-000000000000000000"
+        ).decode()
+        assert client.get(
+            "/v1/settings/storage", headers={"Authorization": f"Basic {basic}"}
+        ).status_code == 200
+    finally:
+        client.headers["Authorization"] = authorization
+
+
+def test_storage_endpoint_allowlist_rejects_loopback_and_unlisted_private(client):
+    for endpoint in ("https://127.0.0.1", "https://10.0.0.1"):
+        response = client.put(
+            "/v1/settings/storage",
+            headers={"X-Settings-Request": "true"},
+            json=storage_payload(endpoint_url=endpoint),
+        )
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "STORAGE_ENDPOINT_FORBIDDEN"
+    assert client.get("/v1/settings/storage").json()["revision"] == 0
     assert client.get("/dashboard").status_code == 200
     upload = client.post("/v1/uploads", files={"file": ("a.txt", b"a")})
     assert upload.status_code == 503
@@ -198,7 +245,15 @@ def test_unconfigured_service_still_serves_health_settings_and_dashboard(client)
 
 
 def test_openapi_and_first_upload_response_contract(client, database):
-    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    contract = client.get("/openapi.json").json()
+    schemas = contract["components"]["schemas"]
+    assert set(contract["components"]["securitySchemes"]) == {
+        "AdminBearer",
+        "AdminBasic",
+        "AdminKeyHeader",
+    }
+    assert "security" in contract["paths"]["/v1/settings/storage"]["get"]
+    assert "security" not in contract["paths"]["/v1/uploads"]["post"]
     assert "UploadResponse" in schemas
     upload_schema = schemas["UploadResponse"]
     assert set(upload_schema["required"]) == {
@@ -431,7 +486,7 @@ def test_storage_preset_management_api_lifecycle(client):
     listed = client.get("/v1/settings/storage/presets").json()["items"]
     assert [item["preset_key"] for item in listed] == ["archive", "main"]
     assert listed[0]["config_revision"] == 1
-    assert listed[0]["endpoint_host"] == "storage.internal"
+    assert listed[0]["endpoint_host"] == "192.0.2.10"
     assert all("config" not in item and "credentials" not in item for item in listed)
     assert "test-ak" not in client.get("/v1/settings/storage/presets").text
 
@@ -977,6 +1032,7 @@ def test_restart_recovers_uncertain_delete_to_deleted(
         background=False,
     )
     with TestClient(first_app, raise_server_exceptions=False) as first_client:
+        first_client.headers["Authorization"] = ADMIN_AUTH
         activate(
             first_client,
             uncertain_delete=True,
@@ -998,6 +1054,7 @@ def test_restart_recovers_uncertain_delete_to_deleted(
         background=False,
     )
     with TestClient(second_app, raise_server_exceptions=False) as second_client:
+        second_client.headers["Authorization"] = ADMIN_AUTH
         recovered = second_client.get(
             f"/v1/upload-tasks/{upload['task_id']}"
         ).json()
@@ -1334,6 +1391,7 @@ def test_recovery_resolves_existing_and_missing_objects(settings, database, regi
         settings=settings, registry=registry, database=database, background=False
     )
     with TestClient(app, raise_server_exceptions=False) as first:
+        first.headers["Authorization"] = ADMIN_AUTH
         activate(first)
         runtime = first.app.state.runtime
         storage = runtime.database.active_storage()
@@ -1362,6 +1420,7 @@ def test_recovery_resolves_existing_and_missing_objects(settings, database, regi
                 FakeProvider.objects[key] = b"restored"
 
     with TestClient(app, raise_server_exceptions=False) as restarted:
+        restarted.headers["Authorization"] = ADMIN_AUTH
         items = restarted.get("/v1/upload-tasks").json()["items"]
         states = {item["object_key"]: item["status"] for item in items}
         assert any(value == "succeeded" for value in states.values())
@@ -1403,6 +1462,48 @@ def test_final_database_failure_recovers_as_present_unclaimed(
     assert detail["delete_capability_available"] is False
 
 
+def test_admin_can_strictly_clean_present_unclaimed_object(client):
+    activate(client)
+    runtime = client.app.state.runtime
+    storage = runtime.database.active_storage()
+    task_id = str(uuid4())
+    key = f"2026/08/03/{task_id}.bin"
+    runtime.database.create_task(
+        {
+            "id": task_id,
+            "request_id": task_id,
+            "idempotency_key": None,
+            "storage_config_id": storage["id"],
+            "filename": "orphan.bin",
+            "content_type": "application/octet-stream",
+            "object_key": key,
+            "public_url": f"https://files.example/{key}",
+            "status": "unknown",
+            "size_bytes": 7,
+            "error_code": "RECOVERY_PENDING",
+            "created_at": utc_now(),
+            "finished_at": None,
+            "duration_ms": None,
+        }
+    )
+    FakeProvider.objects[key] = b"payload"
+    runtime.recovery_complete = False
+    client.portal.call(runtime.recover)
+    assert runtime.database.task_by_id(task_id)["object_status"] == "present_unclaimed"
+
+    response = client.delete(f"/v1/admin/upload-tasks/{task_id}/object")
+
+    assert response.status_code == 200
+    assert response.json()["object_status"] == "deleted"
+    assert key not in FakeProvider.objects
+    audit = runtime.database.list_logs(
+        min_level=25,
+        limit=10,
+        filters={"event": "object_delete_succeeded"},
+    )
+    assert audit[0]["task_id"] == task_id
+
+
 def test_local_failure_is_marked_absent_and_removed_by_retention(client):
     activate(client)
     response = client.post("/v1/uploads", files={"file": ("empty.bin", b"")})
@@ -1428,6 +1529,7 @@ def test_recovery_pass_is_bounded(settings, database, registry):
         settings=settings, registry=registry, database=database, background=False
     )
     with TestClient(app, raise_server_exceptions=False) as test_client:
+        test_client.headers["Authorization"] = ADMIN_AUTH
         activate(test_client, head_delay=0.02, head_timeout=True)
         storage = database.active_storage()
         for _ in range(100):
@@ -1463,6 +1565,7 @@ def test_recovery_keeps_size_mismatch_unknown(settings, database, registry):
         settings=settings, registry=registry, database=database, background=False
     )
     with TestClient(app, raise_server_exceptions=False) as client:
+        client.headers["Authorization"] = ADMIN_AUTH
         activate(client)
         runtime = client.app.state.runtime
         storage = runtime.database.active_storage()
@@ -1489,6 +1592,7 @@ def test_recovery_keeps_size_mismatch_unknown(settings, database, registry):
         FakeProvider.objects[key] = b"too-long"
 
     with TestClient(app, raise_server_exceptions=False) as restarted:
+        restarted.headers["Authorization"] = ADMIN_AUTH
         task = restarted.get(f"/v1/upload-tasks/{task_id}").json()
         assert task["status"] == "unknown"
         assert task["object_status"] == "pending"

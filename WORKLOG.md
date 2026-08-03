@@ -133,3 +133,17 @@
 ### 下一步：Phase 2
 
 - 增加管理员认证、Endpoint allowlist、管理路由保护和 `present_unclaimed` 管理清理接口。
+
+### 已完成：Phase 2 管理控制面安全
+
+- 新增必填 `ADMIN_API_KEYS`，每个 key 至少 32 字符并支持逗号分隔的新旧 key 并行轮换；常量时间验证 Bearer、`X-Admin-Key` 和浏览器原生 HTTP Basic。
+- Dashboard、静态资源、设置、日志、OpenAPI、任务列表与完整详情统一进入管理控制面；普通上传、接收验证、health/ready 和持有 token 的严格删除保持原调用方式。
+- OpenAPI 为管理操作声明 Bearer、Basic 与 Header key 三种可选 security scheme；管理员凭证字段进入日志递归清洗规则，不进入响应或页面 DOM。
+- 新增 `STORAGE_ENDPOINT_ALLOWLIST` 与 HTTPS 默认策略；Provider 创建前校验主机/域名后缀/CIDR，并对 DNS 解析后的 loopback、link-local、metadata 与未授权私网地址再次拒绝。
+- 新增 `DELETE /v1/admin/upload-tasks/{task_id}/object`，只清理 `present_unclaimed`，复用任务原配置、对象元数据、精确版本删除、删除恢复和永久审计。
+- 完整容器测试结果：`79 passed, 3 xfailed`；加固生产容器 smoke test 验证 health 匿名 200、Dashboard 匿名 401、HTTP Basic 200。
+- 独立管理端口、管理员 VLAN 与内网 HTTPS 属于部署网络策略；此前已明确本环境不启用内网 HTTPS/防火墙限制，因此当前以默认应用层认证作为实际边界，不擅自修改服务器网络。
+
+### 下一步：Phase 3
+
+- 为启动恢复增加预算、批次与并发，暴露 backlog；让 EventLogger 与公开运行配置真实进入 readiness。

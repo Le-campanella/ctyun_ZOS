@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from uuid import uuid4
@@ -12,6 +13,7 @@ import pytest
 from botocore.exceptions import ClientError
 from cryptography.fernet import Fernet
 
+from app.config import Settings
 from app.database import (
     Database,
     DefaultPresetConflict,
@@ -28,6 +30,7 @@ from app.providers import (
     ProviderRegistry,
     S3CompatibleProvider,
     default_registry,
+    validate_endpoint_access,
 )
 from app.runtime import Runtime
 from app.security import (
@@ -41,8 +44,7 @@ from app.security import (
 def test_default_database_path_matches_compose_volume(monkeypatch):
     monkeypatch.delenv("DATABASE_PATH", raising=False)
     monkeypatch.setenv("SETTINGS_ENCRYPTION_KEY", Fernet.generate_key().decode())
-
-    from app.config import Settings
+    monkeypatch.setenv("ADMIN_API_KEYS", "test-admin-key-000000000000000000")
 
     assert Settings.from_env().database_path.as_posix() == "/data/db/zos-upload.db"
 
@@ -92,6 +94,16 @@ def test_cipher_round_trip_and_wrong_key(settings):
     other = CredentialCipher(Fernet.generate_key().decode())
     with pytest.raises(ValueError, match="cannot be decrypted"):
         other.decrypt(encrypted)
+
+
+def test_admin_key_is_required_and_rotation_keys_must_be_unique(settings):
+    with pytest.raises(ValueError, match="ADMIN_API_KEYS"):
+        Settings(encryption_key=settings.encryption_key)
+    with pytest.raises(ValueError, match="ADMIN_API_KEYS"):
+        Settings(
+            encryption_key=settings.encryption_key,
+            admin_api_keys=("x" * 32, "x" * 32),
+        )
 
 
 def test_delete_tokens_have_256_bits_and_only_hashes_need_persisting():
@@ -293,6 +305,7 @@ def test_event_logger_redacts_secrets_and_persists_notify(database: Database, ca
             "secret_key": "visible-no",
             "delete_token": "visible-no",
             "token_hash": "visible-no",
+            "x_admin_key": "visible-no",
             "safe": "yes",
         },
     )
@@ -303,6 +316,7 @@ def test_event_logger_redacts_secrets_and_persists_notify(database: Database, ca
         "secret_key": "[REDACTED]",
         "delete_token": "[REDACTED]",
         "token_hash": "[REDACTED]",
+        "x_admin_key": "[REDACTED]",
         "safe": "yes",
     }
     assert "visible-no" not in capsys.readouterr().out
@@ -496,6 +510,31 @@ def test_upload_client_errors_classify_remote_side_effect(settings, status, unce
         provider.upload_file(BytesIO(b"payload"), "object.bin", "application/octet-stream")
 
     assert failure.value.uncertain is uncertain
+
+
+def test_endpoint_policy_checks_scheme_hostname_and_resolved_addresses(
+    settings, monkeypatch
+):
+    policy = replace(
+        settings,
+        storage_endpoint_allowlist=(".storage.example",),
+    )
+    monkeypatch.setattr(
+        "app.providers.socket.getaddrinfo",
+        lambda *_args: [(2, 1, 6, "", ("127.0.0.1", 443))],
+    )
+    with pytest.raises(ProviderError) as blocked:
+        validate_endpoint_access("https://files.storage.example", policy)
+    assert blocked.value.code == "STORAGE_ENDPOINT_FORBIDDEN"
+
+    monkeypatch.setattr(
+        "app.providers.socket.getaddrinfo",
+        lambda *_args: [(2, 1, 6, "", ("8.8.8.8", 443))],
+    )
+    validate_endpoint_access("https://files.storage.example", policy)
+    with pytest.raises(ProviderError) as insecure:
+        validate_endpoint_access("http://files.storage.example", policy)
+    assert insecure.value.code == "STORAGE_ENDPOINT_FORBIDDEN"
 
 
 def test_zos_client_uses_compatible_checksum_policy(settings, monkeypatch):

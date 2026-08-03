@@ -1,6 +1,6 @@
 # 局域网 ZOS 文件上传服务
 
-这是一个单容器、无登录的内部文件网关：接收局域网服务提交的单个文件，临时落盘后上传到当前激活的天翼云 ZOS Bucket，记录 SQLite 任务台账，并返回对象 Key 和公网 URL。请求结束后不保留文件本体。
+这是一个单容器内部文件网关：上传数据面供受控局域网服务调用，Dashboard、设置、日志和完整任务查询由管理员密钥保护。服务临时接收文件并上传到选定对象存储，记录 SQLite 任务台账并返回对象 Key 和公网 URL；请求结束后不保留文件本体。
 
 ## 当前发布基线
 
@@ -40,6 +40,10 @@ docker compose ps
 - 存储设置：`http://<内网IP>:8000/dashboard/settings`
 - 存活检查：`http://<内网IP>:8000/healthz`
 - 就绪检查：`http://<内网IP>:8000/readyz`
+
+首次启动前必须在 `.env` 设置至少 32 字符的 `ADMIN_API_KEYS`。浏览器访问 Dashboard 时使用 HTTP Basic，用户名固定为 `admin`、密码为当前管理员 key；API 客户端可以使用 `Authorization: Bearer <key>` 或 `X-Admin-Key: <key>`。轮换时先用逗号同时配置新旧 key，调用方切换后再移除旧 key。普通上传、接收验证、健康检查和持有 token 的严格删除不要求管理员 key。
+
+`STORAGE_ENDPOINT_ALLOWLIST` 使用逗号配置允许的主机、域名后缀或 CIDR；默认只允许 `.zos.ctyun.cn`。通用 S3 服务必须显式加入其域名或网段。loopback、link-local 和 metadata 地址始终拒绝，HTTP Endpoint 仅可在开发环境显式开启。
 
 服务未配置对象存储时仍可访问 Dashboard 和设置页；`/readyz` 返回 `STORAGE_NOT_CONFIGURED`，未指定预设的上传接口返回 `STORAGE_DEFAULT_NOT_CONFIGURED`。在设置页选择 Provider，填写 S3 API Endpoint、Bucket、公网访问根地址及 AK/SK，先测试连接，再保存激活。
 
@@ -119,7 +123,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果、重启/陈旧任务恢复、永久审计和数据库失败，以及多预设路由和在途快照、上传、SQLite v1/v2/v3 迁移与回滚、凭证加密和清洗、统计、Dashboard 多预设管理与设置接口。
+测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果、重启/陈旧任务恢复、永久审计和数据库失败，以及管理员认证、Endpoint allowlist、无凭证对象管理清理、多预设路由、SQLite v1/v2/v3→v4 迁移与回滚、凭证加密和 Dashboard 设置接口。
 
 ## 部署到局域网服务器
 
@@ -205,7 +209,7 @@ chmod 600 .backup.env
 
 ## 运维边界
 
-- 服务没有应用层认证，只允许绑定可信局域网 IP；不要把端口暴露到公网。
+- 上传数据面仍只允许绑定可信局域网 IP；Dashboard、设置、日志、OpenAPI 和完整任务查询必须提供管理员凭证。不要把端口暴露到公网。
 - 设置请求会携带 AK/SK，正式环境应放在内网 HTTPS 反向代理后，且禁止代理日志记录请求体。
 - `zos-database` 保存 SQLite 和加密后的配置；`zos-temporary` 只保存请求期临时文件。异地备份必须同时包含数据库和 `SETTINGS_ENCRYPTION_KEY`。
 - 服务为上传对象请求 `public-read` canned ACL；Bucket Policy、账号权限、生命周期、未完成 multipart 清理和对象删除仍在 ZOS 侧管理。

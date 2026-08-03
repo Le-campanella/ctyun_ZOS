@@ -30,6 +30,7 @@ from .providers import (
     StorageProvider,
     matches_object_metadata,
     require_upload_metadata,
+    validate_endpoint_access,
 )
 from .security import CredentialCipher
 
@@ -422,6 +423,7 @@ class Runtime:
         normalized_config, normalized_credentials = provider_type.validate(
             config, credentials
         )
+        validate_endpoint_access(normalized_config["endpoint_url"], self.settings)
         provider = provider_type(
             normalized_config, normalized_credentials, self.settings
         )
@@ -722,6 +724,11 @@ class Runtime:
             error_code = "STORAGE_CONFIG_UNAVAILABLE"
             provider_result = type(exc).__name__
         else:
+            present_status = (
+                "present"
+                if task.get("delete_token_hash") is not None
+                else "present_unclaimed"
+            )
             if metadata is None:
                 to_status = "deleted"
                 error_code = None
@@ -732,11 +739,11 @@ class Runtime:
                 task["etag"],
                 task["version_id"],
             ):
-                to_status = "present"
+                to_status = present_status
                 error_code = "DELETE_FAILED"
                 provider_result = "original_present"
             else:
-                to_status = "present"
+                to_status = present_status
                 error_code = "OBJECT_CHANGED"
                 provider_result = "metadata_mismatch"
         if (
@@ -754,7 +761,7 @@ class Runtime:
         self.log.emit(
             NOTIFY,
             "object_delete_recovered"
-            if to_status in {"deleted", "present"}
+            if to_status in {"deleted", "present", "present_unclaimed"}
             else "object_delete_recovery_pending",
             "对象删除恢复状态已更新",
             request_id=task["delete_request_id"],

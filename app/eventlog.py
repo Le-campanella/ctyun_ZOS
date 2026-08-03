@@ -12,7 +12,7 @@ from .database import Database, utc_now
 NOTIFY = 25
 logging.addLevelName(NOTIFY, "NOTIFY")
 SENSITIVE = re.compile(
-    r"(access.?key|secret.?key|authorization|cookie|credential|cipher|password|token)",
+    r"(access.?key|secret.?key|admin.?key|authorization|cookie|credential|cipher|password|token)",
     re.IGNORECASE,
 )
 

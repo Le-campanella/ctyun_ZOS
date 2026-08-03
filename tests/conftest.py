@@ -13,6 +13,8 @@ from app.database import Database
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         encryption_key=Fernet.generate_key().decode(),
+        admin_api_keys=("test-admin-key-000000000000000000",),
+        storage_endpoint_allowlist=("192.0.2.0/24",),
         database_path=tmp_path / "service.db",
         temp_dir=tmp_path / "tmp",
         max_upload_bytes=100,
