@@ -1,4 +1,5 @@
 *:Zone.Identifier
+*.zip
 .env
 .deploy.env
 .backup.env

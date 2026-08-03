@@ -6,6 +6,7 @@ from io import BytesIO
 import re
 import sqlite3
 from threading import Event
+from time import monotonic, sleep
 from typing import BinaryIO
 from uuid import uuid4
 
@@ -80,6 +81,8 @@ class FakeProvider(StorageProvider):
     def head_object(
         self, object_key: str, version_id: str | None = None
     ) -> ObjectMetadata | None:
+        if delay := self.config.get("head_delay"):
+            sleep(delay)
         if self.config.get("head_timeout"):
             raise ProviderError("STORAGE_TIMEOUT", "timeout", uncertain=True)
         if self.config.get("head_missing"):
@@ -1344,6 +1347,99 @@ def test_recovery_resolves_existing_and_missing_objects(settings, database, regi
         object_states = {item["object_key"]: item["object_status"] for item in items}
         assert "present" in object_states.values()
         assert "absent" in object_states.values()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 1 must mark recovered objects without delete tokens unclaimed",
+)
+def test_final_database_failure_recovers_as_present_unclaimed(
+    client, monkeypatch
+):
+    activate(client)
+    database = client.app.state.runtime.database
+    original = database.update_task
+
+    def fail_final_update(task_id, **changes):
+        if changes.get("status") == "succeeded":
+            raise sqlite3.OperationalError("disk full")
+        return original(task_id, **changes)
+
+    monkeypatch.setattr(database, "update_task", fail_final_update)
+    response = client.post("/v1/uploads", files={"file": ("orphan.bin", b"payload")})
+    task_id = response.json()["task_id"]
+    assert response.status_code == 500
+    monkeypatch.setattr(database, "update_task", original)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE upload_tasks SET status='unknown', created_at=? WHERE id=?",
+            ("2020-01-01T00:00:00Z", task_id),
+        )
+
+    client.portal.call(client.app.state.runtime.recover)
+
+    task = database.task_by_id(task_id)
+    assert task["object_status"] == "present_unclaimed"
+    assert task["delete_token_hash"] is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 1 must make local validation failures retention-safe",
+)
+def test_local_failure_is_marked_absent_and_removed_by_retention(client):
+    activate(client)
+    response = client.post("/v1/uploads", files={"file": ("empty.bin", b"")})
+    task_id = response.json()["task_id"]
+    database = client.app.state.runtime.database
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE upload_tasks SET created_at=? WHERE id=?",
+            ("2020-01-01T00:00:00Z", task_id),
+        )
+
+    database.maintain(task_retention_days=1, log_retention_days=30, log_max_rows=100)
+
+    assert database.task_by_id(task_id) is None
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 3 must bound recovery work and leave a visible backlog",
+)
+def test_recovery_pass_is_bounded(settings, database, registry):
+    app = create_app(
+        settings=settings, registry=registry, database=database, background=False
+    )
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        activate(test_client, head_delay=0.02, head_timeout=True)
+        storage = database.active_storage()
+        for _ in range(100):
+            task_id = str(uuid4())
+            database.create_task(
+                {
+                    "id": task_id,
+                    "request_id": task_id,
+                    "idempotency_key": None,
+                    "storage_config_id": storage["id"],
+                    "filename": "pending.bin",
+                    "content_type": "application/octet-stream",
+                    "object_key": f"2026/08/03/{task_id}.bin",
+                    "public_url": None,
+                    "status": "unknown",
+                    "size_bytes": 7,
+                    "error_code": "RECOVERY_PENDING",
+                    "created_at": utc_now(),
+                    "finished_at": None,
+                    "duration_ms": None,
+                }
+            )
+        started = monotonic()
+
+        test_client.portal.call(test_client.app.state.runtime.recover)
+
+        assert monotonic() - started < 0.5
+        assert database.pending_tasks()
 
 
 def test_recovery_keeps_size_mismatch_unknown(settings, database, registry):

@@ -37,6 +37,15 @@ from app.security import (
 )
 
 
+def test_default_database_path_matches_compose_volume(monkeypatch):
+    monkeypatch.delenv("DATABASE_PATH", raising=False)
+    monkeypatch.setenv("SETTINGS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+    from app.config import Settings
+
+    assert Settings.from_env().database_path.as_posix() == "/data/db/zos-upload.db"
+
+
 def storage_record(ciphertext: bytes, *, item_id: str | None = None) -> dict:
     now = utc_now()
     return {

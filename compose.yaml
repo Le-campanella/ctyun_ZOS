@@ -15,6 +15,17 @@ services:
     stop_grace_period: 10m
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    pids_limit: 256
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   zos-database:

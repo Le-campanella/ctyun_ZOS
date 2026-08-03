@@ -103,3 +103,18 @@
 ## 下一步
 
 确认下一次定时备份成功；之后准备第二个业务测试 Bucket，继续多预设与版本化对象验收。
+
+## 2026-08-03 综合审查路线图
+
+### 已完成：Phase 0 基线冻结与即时防护
+
+- 纳入 `docs/review.md` 作为本轮 Phase 0–6 的执行路线图，并保存当前 `docs/openapi.json` 机器契约快照。
+- 新增最终数据库写入失败、无删除能力对象、本地失败 retention、100 项恢复 backlog、首次部署失败和同 schema 回滚的严格 `xfail` 复现测试；对应 Phase 修复后必须转为普通通过测试。
+- Compose 启用 Docker `local` 日志轮转、`cap_drop: ALL`、只读 rootfs、PID 上限和受限 `/tmp` tmpfs；加固生产容器 smoke test 通过，`/healthz` 正常且 schema v3 可写。
+- 数据库默认路径统一为 `/data/db/zos-upload.db`；SDK ZIP 已从 Git 索引移除，Zone.Identifier 已删除并加入忽略规则。
+- 完整容器测试结果：`67 passed, 5 xfailed`。5 项 xfail 是后续 Phase 1、3、4 的已知失败基线。
+- 管理员 IP/VLAN 路径限制属于部署网络策略，当前没有可安全推断的管理员网段，因此未修改服务器防火墙；Phase 2 将以应用层管理员认证提供默认保护，网络隔离留作现场验收。
+
+### 下一步：Phase 1
+
+- 升级 schema v4，引入 `present_unclaimed`，在远端副作用前持久化文件大小，并统一失败、未知与恢复状态不变量。

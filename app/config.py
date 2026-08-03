@@ -28,7 +28,7 @@ def _boolean(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class Settings:
     encryption_key: str
-    database_path: Path = Path("/data/zos-upload.db")
+    database_path: Path = Path("/data/db/zos-upload.db")
     temp_dir: Path = Path("/data/tmp")
     app_timezone: str = "Asia/Shanghai"
     max_upload_bytes: int = 209_715_200
@@ -64,7 +64,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             encryption_key=os.getenv("SETTINGS_ENCRYPTION_KEY", ""),
-            database_path=Path(os.getenv("DATABASE_PATH", "/data/zos-upload.db")),
+            database_path=Path(os.getenv("DATABASE_PATH", "/data/db/zos-upload.db")),
             temp_dir=Path(os.getenv("TEMP_DIR", "/data/tmp")),
             app_timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai"),
             max_upload_bytes=_integer("MAX_UPLOAD_BYTES", 209_715_200, 1),
