@@ -210,6 +210,7 @@ def test_openapi_and_first_upload_response_contract(client, database):
         "content_type",
         "etag",
         "version_id",
+        "delete_capability_available",
         "delete_token",
     }
     assert upload_schema["additionalProperties"] is False
@@ -228,6 +229,7 @@ def test_openapi_and_first_upload_response_contract(client, database):
     assert body["etag"] == '"fake-etag"'
     assert body["version_id"] is None
     assert re.fullmatch(r"[A-Za-z0-9_-]{43}", body["delete_token"])
+    assert body["delete_capability_available"] is True
     assert response.headers["Cache-Control"] == "no-store"
     with database.connect() as connection:
         stored_hash = connection.execute(
@@ -1136,6 +1138,7 @@ def test_empty_oversized_multiple_files_and_failed_idempotency(client):
     assert empty.json()["error"]["code"] == "FILE_EMPTY"
     empty_task = client.get(f"/v1/upload-tasks/{empty.json()['task_id']}").json()
     assert empty_task["status"] == "failed"
+    assert empty_task["object_status"] == "absent"
 
     oversized = client.post(
         "/v1/uploads", files={"file": ("large.bin", b"x" * 101)}
@@ -1167,7 +1170,26 @@ def test_upload_provider_failure_is_persisted(client):
     assert response.json()["error"]["code"] == "UPLOAD_FAILED"
     task = client.get(f"/v1/upload-tasks/{response.json()['task_id']}").json()
     assert task["status"] == "failed"
+    assert task["object_status"] == "absent"
     assert task["public_url"] is None
+
+
+def test_received_size_is_persisted_before_remote_upload(client, monkeypatch):
+    activate(client)
+    provider = FakeProvider.instances[-1]
+    original = provider.upload_file
+
+    def checked_upload(fileobj, object_key, content_type):
+        task = client.app.state.runtime.database.list_tasks(limit=1, offset=0)[0]
+        assert task["status"] == "uploading"
+        assert task["size_bytes"] == 7
+        return original(fileobj, object_key, content_type)
+
+    monkeypatch.setattr(provider, "upload_file", checked_upload)
+
+    response = client.post("/v1/uploads", files={"file": ("a.bin", b"payload")})
+
+    assert response.status_code == 201
 
 
 def test_uncertain_upload_is_recoverable_and_hides_url(client):
@@ -1345,14 +1367,10 @@ def test_recovery_resolves_existing_and_missing_objects(settings, database, regi
         assert any(value == "succeeded" for value in states.values())
         assert any(value == "failed" for value in states.values())
         object_states = {item["object_key"]: item["object_status"] for item in items}
-        assert "present" in object_states.values()
+        assert "present_unclaimed" in object_states.values()
         assert "absent" in object_states.values()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 1 must mark recovered objects without delete tokens unclaimed",
-)
 def test_final_database_failure_recovers_as_present_unclaimed(
     client, monkeypatch
 ):
@@ -1381,12 +1399,10 @@ def test_final_database_failure_recovers_as_present_unclaimed(
     task = database.task_by_id(task_id)
     assert task["object_status"] == "present_unclaimed"
     assert task["delete_token_hash"] is None
+    detail = client.get(f"/v1/upload-tasks/{task_id}").json()
+    assert detail["delete_capability_available"] is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 1 must make local validation failures retention-safe",
-)
 def test_local_failure_is_marked_absent_and_removed_by_retention(client):
     activate(client)
     response = client.post("/v1/uploads", files={"file": ("empty.bin", b"")})

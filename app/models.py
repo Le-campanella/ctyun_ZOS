@@ -170,6 +170,7 @@ class UploadResponse(ContractModel):
     content_type: str
     etag: str | None
     version_id: str | None
+    delete_capability_available: bool
     delete_token: str | None
 
 
@@ -198,6 +199,7 @@ class TaskItemResponse(ContractModel):
     etag: str | None
     version_id: str | None
     object_status: str
+    delete_capability_available: bool
     delete_error_code: str | None
     delete_started_at: str | None
     deleted_at: str | None

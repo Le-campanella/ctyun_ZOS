@@ -341,6 +341,7 @@ def _task_item(task: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
         "etag": task.get("etag"),
         "version_id": task.get("version_id"),
         "object_status": task.get("object_status", "pending"),
+        "delete_capability_available": task.get("delete_token_hash") is not None,
         "delete_error_code": task.get("delete_error_code"),
         "delete_started_at": task.get("delete_started_at"),
         "deleted_at": task.get("deleted_at"),
@@ -366,6 +367,9 @@ def _upload_response(
         "content_type": task["content_type"],
         "etag": task["etag"],
         "version_id": task["version_id"],
+        "delete_capability_available": (
+            delete_token is not None or task.get("delete_token_hash") is not None
+        ),
         "delete_token": delete_token,
     }
 
@@ -1007,6 +1011,7 @@ def create_app(
                     task_id,
                     status="failed",
                     size_bytes=None,
+                    object_status="absent",
                     error_code="FILE_TOO_LARGE",
                     finished_at=utc_now(),
                     duration_ms=_duration(request),
@@ -1022,11 +1027,21 @@ def create_app(
                     task_id,
                     status="failed",
                     size_bytes=0,
+                    object_status="absent",
                     error_code="FILE_EMPTY",
                     finished_at=utc_now(),
                     duration_ms=_duration(request),
                 )
                 raise APIError(400, "FILE_EMPTY", "文件不能为空", task_id=task_id)
+            try:
+                runtime.database.update_task(task_id, size_bytes=size)
+            except sqlite3.Error as exc:
+                raise APIError(
+                    500,
+                    "DATABASE_ERROR",
+                    "无法在上传前保存文件大小",
+                    task_id=task_id,
+                ) from exc
             try:
                 await anyio.to_thread.run_sync(
                     provider.upload_file, spool, object_key, content_type
@@ -1037,6 +1052,7 @@ def create_app(
                     task_id,
                     status=status,
                     size_bytes=size,
+                    object_status="pending" if exc.uncertain else "absent",
                     error_code=exc.code,
                     finished_at=utc_now() if status == "failed" else None,
                     duration_ms=_duration(request),

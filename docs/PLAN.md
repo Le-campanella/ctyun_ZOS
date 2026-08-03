@@ -288,7 +288,7 @@ CREATE TABLE upload_tasks (
     delete_token_hash  BLOB,
     object_status      TEXT NOT NULL CHECK (
         object_status IN (
-            'pending', 'present', 'absent', 'legacy_unverified',
+            'pending', 'present', 'present_unclaimed', 'absent', 'legacy_unverified',
             'deleting', 'deleted', 'delete_unknown'
         )
     ),
@@ -339,7 +339,7 @@ ON upload_tasks(object_status, created_at DESC);
 | `etag` | 上传后 `HeadObject` 返回的不透明 ETag；不得假设为 MD5 |
 | `version_id` | Provider 返回的对象版本 ID；未启用或不支持版本控制时为空 |
 | `delete_token_hash` | 对象级删除凭证的 SHA-256 哈希；明文 token 不持久化 |
-| `object_status` | `pending`、`present`、`absent`、`legacy_unverified`、`deleting`、`deleted` 或 `delete_unknown` |
+| `object_status` | `pending`、`present`、`present_unclaimed`、`absent`、`legacy_unverified`、`deleting`、`deleted` 或 `delete_unknown` |
 | `delete_request_id` | 最近一次删除请求的追踪 ID |
 | `delete_error_code` | 最近一次删除失败或不确定结果的稳定错误码 |
 | `delete_started_at` | 最近一次删除开始时间 |
@@ -410,7 +410,7 @@ PRAGMA foreign_keys=ON;
 7. 写入临时文件，同时校验空文件、文件大小和客户端连接状态。
 8. 通过该配置对应的 Provider adapter 上传文件。
 9. 上传返回成功后执行 `HeadObject`，确认并保存大小、ETag、可选 VersionId，将上传状态更新为 `succeeded`、对象状态更新为 `present`。
-10. 生成随机对象级 `delete_token`，在同一数据库事务中只保存哈希。
+10. 生成随机对象级 `delete_token`，在同一数据库事务中只保存哈希；恢复确认对象存在但没有哈希时进入 `present_unclaimed`。
 11. 数据库更新成功后向调用方返回 `201` 和稳定删除清单。
 12. 任一步骤失败时，将可定位任务更新为 `failed` 或 `unknown`，写入稳定错误码并清理临时文件。
 

@@ -9,7 +9,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_PRESET_ID = "00000000-0000-0000-0000-000000000001"
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS storage_configs (
@@ -196,6 +196,69 @@ SCHEMA_V3 = (
     + SERVICE_LOG_SCHEMA
 )
 
+UPLOAD_TASK_SCHEMA_V4 = """
+CREATE TABLE upload_tasks (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    idempotency_key TEXT,
+    storage_config_id TEXT NOT NULL REFERENCES storage_configs(id),
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    public_url TEXT,
+    status TEXT NOT NULL CHECK (
+        status IN ('uploading', 'unknown', 'succeeded', 'failed')
+    ),
+    size_bytes INTEGER,
+    etag TEXT,
+    version_id TEXT,
+    delete_token_hash BLOB,
+    object_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        object_status IN (
+            'pending', 'present', 'present_unclaimed', 'absent',
+            'legacy_unverified', 'deleting', 'deleted', 'delete_unknown'
+        )
+    ),
+    delete_request_id TEXT,
+    delete_error_code TEXT,
+    delete_started_at TEXT,
+    deleted_at TEXT,
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    duration_ms INTEGER,
+    CHECK (
+        (status IN ('uploading', 'unknown') AND object_status='pending')
+        OR (status='failed' AND object_status='absent')
+        OR (
+            status='succeeded' AND object_status IN (
+                'present', 'present_unclaimed', 'legacy_unverified',
+                'deleting', 'deleted', 'delete_unknown'
+            )
+        )
+    )
+);
+CREATE UNIQUE INDEX uq_upload_tasks_idempotency_key
+ON upload_tasks(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_upload_tasks_created_at_id
+ON upload_tasks(created_at DESC, id DESC);
+CREATE INDEX idx_upload_tasks_status_created_at
+ON upload_tasks(status, created_at DESC);
+CREATE INDEX idx_upload_tasks_request_id
+ON upload_tasks(request_id);
+CREATE INDEX idx_upload_tasks_storage_config_id
+ON upload_tasks(storage_config_id);
+CREATE INDEX idx_upload_tasks_object_status
+ON upload_tasks(object_status, created_at DESC);
+"""
+
+SCHEMA_V4 = (
+    PRESET_SCHEMA_V3
+    + STORAGE_CONFIG_SCHEMA_V3
+    + UPLOAD_TASK_SCHEMA_V4
+    + SERVICE_LOG_SCHEMA
+)
+
 
 def _execute_statements(connection: sqlite3.Connection, script: str) -> None:
     for statement in script.split(";"):
@@ -227,23 +290,35 @@ class Database:
         with closing(self.connect()) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                 raise RuntimeError(f"unsupported database schema version: {version}")
             backup = (
-                self._backup_before_upgrade(connection) if version in (1, 2) else None
+                self._backup_before_upgrade(connection)
+                if version in (1, 2, 3)
+                else None
             )
             if version == 0:
-                self._run_migration(connection, 3, self._create_schema_v3)
+                self._run_migration(connection, 4, self._create_schema_v4)
             elif version == 1:
                 self._run_migration(connection, 2, self._migrate_v1_to_v2)
                 self._run_migration(
                     connection, 3, self._migrate_v2_to_v3, foreign_keys=False
                 )
+                self._run_migration(
+                    connection, 4, self._migrate_v3_to_v4, foreign_keys=False
+                )
             elif version == 2:
                 self._run_migration(
                     connection, 3, self._migrate_v2_to_v3, foreign_keys=False
                 )
-            self._verify_schema_v3(connection)
+                self._run_migration(
+                    connection, 4, self._migrate_v3_to_v4, foreign_keys=False
+                )
+            elif version == 3:
+                self._run_migration(
+                    connection, 4, self._migrate_v3_to_v4, foreign_keys=False
+                )
+            self._verify_schema_v4(connection)
             return backup
 
     def _run_migration(
@@ -268,8 +343,8 @@ class Database:
             if not foreign_keys:
                 connection.execute("PRAGMA foreign_keys=ON")
 
-    def _create_schema_v3(self, connection: sqlite3.Connection) -> None:
-        _execute_statements(connection, SCHEMA_V3)
+    def _create_schema_v4(self, connection: sqlite3.Connection) -> None:
+        _execute_statements(connection, SCHEMA_V4)
 
     def _migrate_v1_to_v2(self, connection: sqlite3.Connection) -> None:
         additions = (
@@ -386,16 +461,59 @@ class Database:
         connection.execute("DROP TABLE upload_tasks_v2")
         connection.execute("DROP TABLE storage_configs_v2")
 
+    def _migrate_v3_to_v4(self, connection: sqlite3.Connection) -> None:
+        for index in (
+            "uq_upload_tasks_idempotency_key",
+            "idx_upload_tasks_created_at_id",
+            "idx_upload_tasks_status_created_at",
+            "idx_upload_tasks_request_id",
+            "idx_upload_tasks_storage_config_id",
+            "idx_upload_tasks_object_status",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index}")
+        connection.execute("ALTER TABLE upload_tasks RENAME TO upload_tasks_v3")
+        _execute_statements(connection, UPLOAD_TASK_SCHEMA_V4)
+        connection.execute(
+            """
+            INSERT INTO upload_tasks (
+                id, request_id, idempotency_key, storage_config_id, filename,
+                content_type, object_key, public_url, status, size_bytes, etag,
+                version_id, delete_token_hash, object_status, delete_request_id,
+                delete_error_code, delete_started_at, deleted_at, error_code,
+                created_at, finished_at, duration_ms
+            )
+            SELECT id, request_id, idempotency_key, storage_config_id, filename,
+                   content_type, object_key, public_url, status, size_bytes, etag,
+                   version_id, delete_token_hash,
+                   CASE
+                       WHEN status='failed' THEN 'absent'
+                       WHEN status IN ('uploading', 'unknown') THEN 'pending'
+                       WHEN object_status='present' AND delete_token_hash IS NULL
+                           THEN 'present_unclaimed'
+                       WHEN status='succeeded' AND object_status='pending'
+                            AND delete_token_hash IS NULL
+                           THEN 'present_unclaimed'
+                       WHEN status='succeeded' AND object_status='pending'
+                           THEN 'present'
+                       ELSE object_status
+                   END,
+                   delete_request_id, delete_error_code, delete_started_at,
+                   deleted_at, error_code, created_at, finished_at, duration_ms
+            FROM upload_tasks_v3
+            """
+        )
+        connection.execute("DROP TABLE upload_tasks_v3")
+
     def _backup_before_upgrade(self, connection: sqlite3.Connection) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        backup_path = self.path.with_name(f"{self.path.name}.pre-v3-{timestamp}")
+        backup_path = self.path.with_name(f"{self.path.name}.pre-v4-{timestamp}")
         with closing(sqlite3.connect(backup_path)) as destination:
             connection.backup(destination)
         return backup_path
 
-    def _verify_schema_v3(self, connection: sqlite3.Connection) -> None:
+    def _verify_schema_v4(self, connection: sqlite3.Connection) -> None:
         if connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-            raise RuntimeError("database schema version is not v3")
+            raise RuntimeError("database schema version is not v4")
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("database integrity check failed")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -413,7 +531,7 @@ class Database:
             )
         }
         if not required <= tables:
-            raise RuntimeError("database schema v3 is incomplete")
+            raise RuntimeError("database schema v4 is incomplete")
         columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(upload_tasks)")
         }
@@ -424,13 +542,18 @@ class Database:
             "object_status",
             "deleted_at",
         } <= columns:
-            raise RuntimeError("upload task schema v3 is incomplete")
+            raise RuntimeError("upload task schema v4 is incomplete")
+        upload_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='upload_tasks'"
+        ).fetchone()[0]
+        if "present_unclaimed" not in upload_sql:
+            raise RuntimeError("upload task schema v4 lacks unclaimed state")
         config_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(storage_configs)")
         }
         if "preset_id" not in config_columns:
-            raise RuntimeError("storage config schema v3 is incomplete")
+            raise RuntimeError("storage config schema v4 is incomplete")
         preset_count = connection.execute(
             "SELECT COUNT(*) FROM storage_presets"
         ).fetchone()[0]
@@ -756,6 +879,15 @@ class Database:
             }
 
     def create_task(self, record: dict[str, Any]) -> None:
+        status = record["status"]
+        object_status = record.get(
+            "object_status",
+            "absent"
+            if status == "failed"
+            else "present"
+            if status == "succeeded"
+            else "pending",
+        )
         columns = (
             "id",
             "request_id",
@@ -766,6 +898,7 @@ class Database:
             "object_key",
             "public_url",
             "status",
+            "object_status",
             "size_bytes",
             "error_code",
             "created_at",
@@ -776,7 +909,10 @@ class Database:
             connection.execute(
                 f"INSERT INTO upload_tasks ({','.join(columns)}) "
                 f"VALUES ({','.join('?' for _ in columns)})",
-                tuple(record.get(column) for column in columns),
+                tuple(
+                    object_status if column == "object_status" else record.get(column)
+                    for column in columns
+                ),
             )
 
     def update_task(self, task_id: str, **changes: Any) -> None:

@@ -1489,6 +1489,10 @@
             "title": "Created At",
             "type": "string"
           },
+          "delete_capability_available": {
+            "title": "Delete Capability Available",
+            "type": "boolean"
+          },
           "delete_error_code": {
             "anyOf": [
               {
@@ -1676,6 +1680,7 @@
           "etag",
           "version_id",
           "object_status",
+          "delete_capability_available",
           "delete_error_code",
           "delete_started_at",
           "deleted_at",
@@ -1698,6 +1703,10 @@
           "created_at": {
             "title": "Created At",
             "type": "string"
+          },
+          "delete_capability_available": {
+            "title": "Delete Capability Available",
+            "type": "boolean"
           },
           "delete_error_code": {
             "anyOf": [
@@ -1875,6 +1884,7 @@
           "etag",
           "version_id",
           "object_status",
+          "delete_capability_available",
           "delete_error_code",
           "delete_started_at",
           "deleted_at",
@@ -1919,6 +1929,10 @@
           "content_type": {
             "title": "Content Type",
             "type": "string"
+          },
+          "delete_capability_available": {
+            "title": "Delete Capability Available",
+            "type": "boolean"
           },
           "delete_token": {
             "anyOf": [
@@ -1983,6 +1997,7 @@
           "content_type",
           "etag",
           "version_id",
+          "delete_capability_available",
           "delete_token"
         ],
         "title": "UploadResponse",

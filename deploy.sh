@@ -35,6 +35,7 @@ remote_path="\$HOME/$DEPLOY_REMOTE_DIR"
 project=ctyun_zos
 tag="$(git -C "$repo_dir" rev-parse --short=12 HEAD)"
 image="zos-upload-service:$tag"
+new_schema=
 backup_name="deploy-$(date -u +%Y%m%dT%H%M%SZ)-schema"
 deployed=0
 previous_image=
@@ -51,7 +52,7 @@ rollback() {
   previous_tag="${previous_image##*:}"
   ssh "${ssh_options[@]}" "$DEPLOY_TARGET" \
     "cd \"$remote_path\" && docker compose --project-name \"$project\" stop zos-upload"
-  if [[ "$previous_schema" != 3 ]]; then
+  if [[ "$previous_schema" != "$new_schema" ]]; then
     ssh "${ssh_options[@]}" "$DEPLOY_TARGET" \
       "docker run --rm -v \"$database_volume:/data/db\" \"$image\" python -c 'import os,pathlib,sqlite3,sys; src=sys.argv[1]; dst=sys.argv[2]; [pathlib.Path(dst+s).unlink(missing_ok=True) for s in (\"-wal\",\"-shm\")]; source=sqlite3.connect(src); target=sqlite3.connect(dst); source.backup(target); target.close(); source.close()' \"/data/db/deploy-backups/$backup_name-$previous_schema.sqlite3\" /data/db/zos-upload.db"
   fi
@@ -71,6 +72,7 @@ fi
 docker build --target test -t "${image}-test" .
 docker run --rm "${image}-test"
 docker build --target runtime -t "$image" .
+new_schema="$(docker run --rm "$image" python -c 'from app.database import SCHEMA_VERSION; print(SCHEMA_VERSION)')"
 
 ssh "${ssh_options[@]}" "$DEPLOY_TARGET" \
   "docker info >/dev/null && docker compose version >/dev/null && mkdir -p \"$remote_path\""

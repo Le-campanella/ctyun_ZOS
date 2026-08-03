@@ -369,12 +369,27 @@ class CtyunZosProvider(StorageProvider):
                 ExtraArgs={"ContentType": content_type, "ACL": "public-read"},
                 Config=self._transfer,
             )
-        except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError) as exc:
+        except (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            ReadTimeoutError,
+            EndpointConnectionError,
+            socket.gaierror,
+        ) as exc:
             raise ProviderError(
                 "STORAGE_TIMEOUT", "Storage Provider 上传超时", uncertain=True
             ) from exc
+        except ClientError as exc:
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            raise ProviderError(
+                "UPLOAD_FAILED",
+                "Storage Provider 上传失败",
+                uncertain=isinstance(status, int) and status >= 500,
+            ) from exc
         except Exception as exc:
-            raise ProviderError("UPLOAD_FAILED", "Storage Provider 上传失败") from exc
+            raise ProviderError(
+                "UPLOAD_FAILED", "Storage Provider 上传失败", uncertain=True
+            ) from exc
 
     def head_object(
         self, object_key: str, version_id: str | None = None

@@ -49,7 +49,7 @@ def test_private_encrypted_backup_round_trip(settings, database, tmp_path):
     result = create(environment(settings), storage)
 
     assert result["status"] == "ok"
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
     assert result["object_key"].startswith("zos-service/")
     assert storage.last_put["ACL"] == "private"
     blob = storage.last_put["Body"]

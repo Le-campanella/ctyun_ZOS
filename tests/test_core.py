@@ -9,6 +9,7 @@ from io import BytesIO
 from uuid import uuid4
 
 import pytest
+from botocore.exceptions import ClientError
 from cryptography.fernet import Fernet
 
 from app.database import (
@@ -470,6 +471,31 @@ def test_zos_provider_validation_upload_url_and_head(settings):
         "VersionId": "version-1",
     }
     assert provider.head_object("missing") is None
+
+
+@pytest.mark.parametrize(("status", "uncertain"), [(403, False), (503, True)])
+def test_upload_client_errors_classify_remote_side_effect(settings, status, uncertain):
+    class FailingUploadS3(FakeS3):
+        def upload_fileobj(self, *_args, **_kwargs):
+            raise ClientError(
+                {
+                    "Error": {"Code": "Injected"},
+                    "ResponseMetadata": {"HTTPStatusCode": status},
+                },
+                "PutObject",
+            )
+
+    provider = CtyunZosProvider(
+        valid_config(),
+        {"access_key": "ak", "secret_key": "sk"},
+        settings,
+        client=FailingUploadS3(),
+    )
+
+    with pytest.raises(ProviderError) as failure:
+        provider.upload_file(BytesIO(b"payload"), "object.bin", "application/octet-stream")
+
+    assert failure.value.uncertain is uncertain
 
 
 def test_zos_client_uses_compatible_checksum_policy(settings, monkeypatch):

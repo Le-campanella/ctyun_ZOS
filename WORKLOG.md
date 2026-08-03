@@ -118,3 +118,18 @@
 ### 下一步：Phase 1
 
 - 升级 schema v4，引入 `present_unclaimed`，在远端副作用前持久化文件大小，并统一失败、未知与恢复状态不变量。
+
+### 已完成：Phase 1 上传状态完整性与 schema v4
+
+- schema v4 新增 `present_unclaimed`，并用数据库 CHECK 约束 `status × object_status`：本地或确定失败为 `failed + absent`，不确定上传为 `unknown + pending`，成功对象进入明确的存在、无凭证或删除状态。
+- 空库直接创建 v4；v1/v2 依次迁移，v3 事务迁移到 v4。升级前创建 `pre-v4` SQLite Online Backup，迁移失败保持原 schema 与表结构。
+- 文件接收完成后、调用 Provider 前先持久化 `size_bytes`；该写入失败时不会产生远端副作用。
+- ConnectionClosed、连接/读取超时、未知 SDK 异常和 Provider 5xx 使用保守的不确定语义；确定 4xx 拒绝可进入 `absent` 与 retention。
+- 恢复确认对象存在但 `delete_token_hash` 缺失时进入 `present_unclaimed`；任务 API 增加 `delete_capability_available`，Dashboard 使用高优先级告警且公开严格删除继续拒绝该状态。
+- 部署脚本从新镜像读取 `SCHEMA_VERSION`，跨 v3→v4 回滚不再依赖硬编码版本；README、PLAN、API 与 OpenAPI 快照已同步。
+- 完整容器测试结果：`74 passed, 3 xfailed`；JavaScript 语法、Shell 语法和 Git diff 校验通过。
+- 真实 ZOS 小文件、multipart 与近上限文件将在发布候选部署时使用现有验收脚本执行，避免开发阶段额外写入生产 Bucket。
+
+### 下一步：Phase 2
+
+- 增加管理员认证、Endpoint allowlist、管理路由保护和 `present_unclaimed` 管理清理接口。

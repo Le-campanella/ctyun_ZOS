@@ -12,6 +12,7 @@
   const objectStatusNames = {
     pending: "待确认",
     present: "对象存在",
+    present_unclaimed: "对象存在 · 无删除凭证",
     absent: "对象不存在",
     legacy_unverified: "历史未验证",
     deleting: "删除中",

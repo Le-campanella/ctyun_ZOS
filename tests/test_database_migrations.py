@@ -79,7 +79,16 @@ def create_v2(path: Path) -> None:
         database._run_migration(connection, 2, database._migrate_v1_to_v2)
 
 
-def test_empty_database_creates_schema_v3_and_is_idempotent(tmp_path: Path):
+def create_v3(path: Path) -> None:
+    create_v2(path)
+    database = Database(path)
+    with database.connect() as connection:
+        database._run_migration(
+            connection, 3, database._migrate_v2_to_v3, foreign_keys=False
+        )
+
+
+def test_empty_database_creates_schema_v4_and_is_idempotent(tmp_path: Path):
     path = tmp_path / "empty.db"
     database = Database(path)
 
@@ -104,7 +113,7 @@ def test_empty_database_creates_schema_v3_and_is_idempotent(tmp_path: Path):
         assert connection.execute("SELECT COUNT(*) FROM storage_presets").fetchone()[0] == 0
 
 
-def test_v1_to_v3_preserves_ids_revisions_tasks_and_creates_backup(tmp_path: Path):
+def test_v1_to_v4_preserves_ids_revisions_tasks_and_creates_backup(tmp_path: Path):
     path = tmp_path / "service.db"
     create_v1(path)
     database = Database(path)
@@ -112,13 +121,13 @@ def test_v1_to_v3_preserves_ids_revisions_tasks_and_creates_backup(tmp_path: Pat
     backup = database.initialize()
 
     assert backup is not None and backup.exists()
-    assert backup.name.startswith("service.db.pre-v3-")
+    assert backup.name.startswith("service.db.pre-v4-")
     with sqlite3.connect(backup) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM upload_tasks").fetchone()[0] == 4
 
     with database.connect() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         preset = connection.execute("SELECT * FROM storage_presets").fetchone()
         assert (preset["preset_key"], preset["enabled"], preset["is_default"]) == (
             "default",
@@ -155,7 +164,7 @@ def test_v1_to_v3_preserves_ids_revisions_tasks_and_creates_backup(tmp_path: Pat
     assert database.initialize() is None
 
 
-def test_v2_to_v3_allows_revision_one_per_preset(tmp_path: Path):
+def test_v2_to_v4_allows_revision_one_per_preset(tmp_path: Path):
     path = tmp_path / "service.db"
     create_v2(path)
     database = Database(path)
@@ -221,3 +230,56 @@ def test_v2_to_v3_failure_rolls_back_current_migration(tmp_path: Path, monkeypat
         assert "upload_tasks" in tables
         assert "broken_tasks" not in tables
         assert connection.execute("SELECT COUNT(*) FROM upload_tasks").fetchone()[0] == 4
+
+
+def test_v3_to_v4_marks_unclaimed_objects_and_enforces_state_invariants(
+    tmp_path: Path,
+):
+    path = tmp_path / "service.db"
+    create_v3(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            UPDATE upload_tasks
+            SET status='succeeded', object_status='present', delete_token_hash=NULL
+            WHERE id=?
+            """,
+            (TASK_IDS["succeeded"],),
+        )
+        connection.commit()
+    database = Database(path)
+
+    backup = database.initialize()
+
+    assert backup is not None and backup.name.startswith("service.db.pre-v4-")
+    task = database.task_by_id(TASK_IDS["succeeded"])
+    assert task["object_status"] == "present_unclaimed"
+    with pytest.raises(sqlite3.IntegrityError):
+        database.update_task(
+            TASK_IDS["failed"], status="failed", object_status="pending"
+        )
+
+
+def test_v3_to_v4_failure_rolls_back_current_migration(tmp_path: Path, monkeypatch):
+    path = tmp_path / "service.db"
+    create_v3(path)
+    database = Database(path)
+
+    def fail_after_rename(connection):
+        connection.execute("ALTER TABLE upload_tasks RENAME TO broken_tasks")
+        raise RuntimeError("injected v4 migration failure")
+
+    monkeypatch.setattr(database, "_migrate_v3_to_v4", fail_after_rename)
+    with pytest.raises(RuntimeError, match="injected v4 migration failure"):
+        database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "upload_tasks" in tables
+        assert "broken_tasks" not in tables

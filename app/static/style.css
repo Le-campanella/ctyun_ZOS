@@ -107,6 +107,7 @@ h2 { margin: 3px 0 0; font-size: 1.25rem; }
 .object-deleted, .object-absent { color: var(--muted); }
 .object-deleting, .object-delete_unknown { color: var(--yellow); }
 .object-present { color: var(--green); }
+.object-present_unclaimed { color: var(--red); font-weight: 700; }
 .range-tabs { display: flex; gap: 6px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; }
 .range {
   padding: 7px 10px;

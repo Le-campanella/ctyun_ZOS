@@ -16,7 +16,13 @@ from uuid import uuid4
 import anyio
 
 from .config import Settings
-from .database import Database, PresetNotFound, RevisionConflict, utc_now
+from .database import (
+    SCHEMA_VERSION,
+    Database,
+    PresetNotFound,
+    RevisionConflict,
+    utc_now,
+)
 from .eventlog import EventLogger, NOTIFY
 from .providers import (
     ProviderError,
@@ -88,7 +94,7 @@ class Runtime:
             "database_schema_ready",
             "数据库 schema 已就绪",
             details={
-                "schema_version": 3,
+                "schema_version": SCHEMA_VERSION,
                 "migration_backup_created": migration_backup is not None,
                 "migration_backup_name": migration_backup.name
                 if migration_backup
@@ -658,13 +664,18 @@ class Runtime:
                 else:
                     if task["size_bytes"] is not None:
                         require_upload_metadata(metadata, task["size_bytes"])
+                    object_status = (
+                        "present"
+                        if task.get("delete_token_hash") is not None
+                        else "present_unclaimed"
+                    )
                     self.database.update_task(
                         task["id"],
                         status="succeeded",
                         size_bytes=metadata.size_bytes,
                         etag=metadata.etag,
                         version_id=metadata.version_id,
-                        object_status="present",
+                        object_status=object_status,
                         error_code=None,
                         finished_at=utc_now(),
                     )

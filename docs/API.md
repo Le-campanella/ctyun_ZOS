@@ -2,8 +2,8 @@
 status: unreleased
 target_version: v3
 implementation_baseline: API v1
-database_schema: v3
-implementation_status: multi_provider_preset_ui_ready
+database_schema: v4
+implementation_status: upload_state_integrity_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
@@ -211,6 +211,7 @@ X-Request-ID: 82d1f9d8-...
   "content_type": "application/pdf",
   "etag": "\"opaque-etag\"",
   "version_id": null,
+  "delete_capability_available": true,
   "delete_token": "opaque-object-delete-capability"
 }
 ```
@@ -225,6 +226,7 @@ X-Request-ID: 82d1f9d8-...
 | `content_type` | string | 上传到对象存储的 Content-Type |
 | `etag` | string | Provider 返回的不透明对象 ETag；不得假设为 MD5 |
 | `version_id` | string 或 null | 对象版本 ID；Bucket 未启用或 Provider 不支持版本控制时为 null |
+| `delete_capability_available` | boolean | 服务是否已持久化该对象删除凭证的哈希；`false` 表示需要管理员清理 |
 | `delete_token` | string | 只允许删除本任务对象的敏感持有者凭证；仅首次 `201` 返回 |
 
 收到 `201` 表示：
@@ -262,6 +264,7 @@ Idempotency-Replayed: true
   "content_type": "application/pdf",
   "etag": "\"opaque-etag\"",
   "version_id": null,
+  "delete_capability_available": true,
   "delete_token": null
 }
 ```
@@ -399,6 +402,7 @@ Host: zos-upload-service:8000
       "etag": "\"opaque-etag\"",
       "version_id": null,
       "object_status": "present",
+      "delete_capability_available": true,
       "delete_error_code": null,
       "delete_started_at": null,
       "deleted_at": null,
@@ -422,6 +426,7 @@ Host: zos-upload-service:8000
       "etag": null,
       "version_id": null,
       "object_status": "pending",
+      "delete_capability_available": false,
       "delete_error_code": null,
       "delete_started_at": null,
       "deleted_at": null,
@@ -453,7 +458,8 @@ Host: zos-upload-service:8000
 | `size_bytes` | integer 或 null | 已确认的文件大小 |
 | `etag` | string 或 null | 对象 ETag；不透明字符串，不保证是 MD5 |
 | `version_id` | string 或 null | 上传对象的精确版本 ID |
-| `object_status` | string | `pending`、`present`、`absent`、`legacy_unverified`、`deleting`、`deleted` 或 `delete_unknown` |
+| `object_status` | string | `pending`、`present`、`present_unclaimed`、`absent`、`legacy_unverified`、`deleting`、`deleted` 或 `delete_unknown` |
+| `delete_capability_available` | boolean | 是否已持久化删除凭证哈希；不返回 token 或哈希本身 |
 | `delete_error_code` | string 或 null | 最近一次删除失败或不确定结果的稳定错误码 |
 | `delete_started_at` | string 或 null | 最近一次删除开始时间 |
 | `deleted_at` | string 或 null | 服务确认对象或精确版本不存在的时间 |
@@ -492,6 +498,7 @@ Host: zos-upload-service:8000
   "etag": "\"opaque-etag\"",
   "version_id": null,
   "object_status": "present",
+  "delete_capability_available": true,
   "delete_error_code": null,
   "delete_started_at": null,
   "deleted_at": null,
@@ -536,6 +543,7 @@ X-Request-ID: optional-request-id
 - 服务对提交 token 计算 SHA-256，并与任务保存的哈希执行常量时间比较。缺失、格式错误、篡改或跨任务使用统一返回 `403 DELETE_TOKEN_INVALID`。
 - 只有上传状态为 `succeeded` 且对象状态为 `present` 的任务可以开始删除。
 - `legacy_unverified` 历史任务默认没有可用删除凭证，也不可删除。
+- `present_unclaimed` 表示恢复确认对象存在但调用方删除能力未建立，只允许后续受认证的管理清理接口处理。
 
 ### 7.2 严格删除流程
 
@@ -1769,6 +1777,7 @@ uploading ──确认成功──────────────> succeede
 |---|---|
 | `pending` | 尚未确认对象是否存在或元数据不完整 |
 | `present` | 已确认对象存在，且大小、ETag 和可选 VersionId 已持久化 |
+| `present_unclaimed` | 已确认对象存在，但没有可交付的删除凭证；Dashboard 高优先级告警 |
 | `absent` | 已确认上传没有产生对象 |
 | `legacy_unverified` | v1 历史成功任务，缺少严格删除所需元数据或删除凭证 |
 | `deleting` | 删除请求正在调用 Provider |

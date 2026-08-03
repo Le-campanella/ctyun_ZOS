@@ -5,7 +5,7 @@
 ## 当前发布基线
 
 - 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
-- 当前仓库数据库：schema v3；上传返回成功前会用 HeadObject 校验远端大小，并在任务中保存 ETag、可选 VersionId 和对象状态。
+- 当前仓库数据库：schema v4；上传调用 Provider 前先持久化已接收大小，成功返回前用 HeadObject 校验远端大小，并保存 ETag、可选 VersionId 和对象状态。
 - 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API。上传接口可通过 `X-Storage-Preset` 选择已启用预设，未传时使用默认项。
 - Dashboard 设置页已支持多服务预设的创建、测试、更新、启停和默认切换；每项预设独立绑定 Provider、Endpoint、Bucket 和凭证。监控页可选择预设执行真实上传测试，并只读展示对象与删除状态。
 - 内置 Provider 包括 `ctyun_zos` 和 `s3_compatible`。后者适用于支持 S3 API、HeadObject、DeleteObject 和 `public-read` ACL 的其他对象存储服务；不声称兼容所有厂商私有协议。
@@ -47,13 +47,13 @@ docker compose ps
 
 服务启动时使用 `PRAGMA user_version` 检测数据库版本：
 
-- 空数据库直接创建 schema v3。
-- schema v1 依次事务升级到 v2、v3。
-- schema v2 事务升级到 v3。
-- 升级前使用 SQLite Online Backup 在数据库旁创建 `zos-upload.db.pre-v3-<timestamp>`，包括 WAL 中已提交数据。
+- 空数据库直接创建 schema v4。
+- schema v1 依次事务升级到 v2、v3、v4。
+- schema v2 依次事务升级到 v3、v4；schema v3 事务升级到 v4。
+- 升级前使用 SQLite Online Backup 在数据库旁创建 `zos-upload.db.pre-v4-<timestamp>`，包括 WAL 中已提交数据。
 - 升级后执行 `integrity_check`、外键、默认预设、active revision 和引用完整性检查；失败时停止启动。
 
-schema v3 保留原 task ID、storage config ID 和 revision。历史成功任务标记为 `legacy_unverified`，不会获得删除凭证。不要让旧镜像直接打开已经升级的数据库；需要回滚旧镜像时，必须同时恢复升级前备份。
+schema v4 保留原 task ID、storage config ID 和 revision。历史成功任务继续标记为 `legacy_unverified`；恢复确认远端对象存在但没有删除 token hash 时标记为 `present_unclaimed` 并在 Dashboard 告警。不要让旧镜像直接打开已经升级的数据库；需要回滚旧镜像时，必须同时恢复升级前备份。
 
 ## 调用上传接口
 
@@ -91,6 +91,7 @@ curl -fsS \
   "content_type": "application/pdf",
   "etag": "\"opaque-etag\"",
   "version_id": null,
+  "delete_capability_available": true,
   "delete_token": "仅首次响应返回的敏感凭证"
 }
 ```

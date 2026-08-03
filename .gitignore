@@ -21,3 +21,6 @@ assets/
 *.db.pre-v3-*
 *.sqlite.pre-v3-*
 *.sqlite3.pre-v3-*
+*.db.pre-v4-*
+*.sqlite.pre-v4-*
+*.sqlite3.pre-v4-*
