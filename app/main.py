@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-import base64
-import binascii
-import math
-import re
-import secrets
 import sqlite3
-from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from pathlib import Path
-from time import monotonic
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
-from uuid import UUID, uuid4
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import anyio
@@ -24,7 +16,6 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.datastructures import UploadFile
 
 from .config import Settings
 from .database import (
@@ -32,11 +23,27 @@ from .database import (
     DefaultPresetConflict,
     PresetNotFound,
     PresetStateConflict,
-    QuotaExceeded,
     RevisionConflict,
     utc_now,
 )
-from .eventlog import NOTIFY
+from .deletions import delete_task_object as process_delete_task_object
+from .http import (
+    APIError,
+    RequestGuardMiddleware,
+    error_body,
+)
+from .http import (
+    admin_path as _admin_path,
+)
+from .http import (
+    database_call as _database_call,
+)
+from .http import (
+    no_store as _no_store,
+)
+from .http import (
+    request_id as _request_id,
+)
 from .models import (
     DashboardLogsResponse,
     DashboardStorageResponse,
@@ -66,360 +73,23 @@ from .providers import (
     ProviderError,
     ProviderRegistry,
     default_registry,
-    matches_object_metadata,
-    require_upload_metadata,
 )
 from .runtime import Runtime
-from .security import issue_delete_token, matches_delete_token
+from .uploads import (
+    preset_key as _preset_key,
+)
+from .uploads import (
+    provider_status as _provider_status,
+)
+from .uploads import (
+    upload as process_upload,
+)
+from .uploads import (
+    validate_upload as process_validate_upload,
+)
 
 STATUS_VALUES = {"uploading", "unknown", "succeeded", "failed"}
 LEVELS = {"NOTIFY": 25, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
-SAFE_EXTENSION = re.compile(r"^[a-z0-9]{1,10}$")
-SAFE_PRESET_KEY = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
-
-
-def _admin_path(path: str, method: str) -> bool:
-    return (
-        path.startswith("/v1/settings/")
-        or path == "/v1/settings/storage"
-        or path.startswith("/v1/dashboard/")
-        or path.startswith("/v1/admin/")
-        or path
-        in {"/dashboard", "/dashboard/settings", "/openapi.json", "/docs", "/redoc"}
-        or path.startswith("/static/")
-        or (
-            method == "GET"
-            and (path == "/v1/upload-tasks" or path.startswith("/v1/upload-tasks/"))
-        )
-    )
-
-
-def _admin_key(headers: dict[bytes, bytes]) -> str | None:
-    direct = headers.get(b"x-admin-key")
-    if direct:
-        return direct.decode("latin1")
-    authorization = headers.get(b"authorization", b"").decode("latin1")
-    scheme, _, value = authorization.partition(" ")
-    if scheme.lower() == "bearer" and value:
-        return value
-    if scheme.lower() == "basic" and value:
-        try:
-            username, separator, password = (
-                base64.b64decode(value, validate=True).decode("utf-8").partition(":")
-            )
-        except (binascii.Error, UnicodeDecodeError):
-            return None
-        if separator and username == "admin":
-            return password
-    return None
-
-
-def _valid_admin_key(supplied: str | None, expected: tuple[str, ...]) -> bool:
-    candidate = supplied or ""
-    matched = False
-    for key in expected:
-        matched |= secrets.compare_digest(candidate, key)
-    return matched
-
-
-def _client_identity(headers: dict[bytes, bytes], settings: Settings) -> str | None:
-    if _valid_admin_key(_admin_key(headers), settings.admin_api_keys):
-        return "admin-dashboard"
-    if not settings.client_api_keys:
-        return "legacy"
-    client_id = headers.get(b"x-client-id", b"").decode("latin1")
-    supplied = headers.get(b"x-client-key", b"").decode("latin1")
-    matched = False
-    for expected_id, expected_key in settings.client_api_keys:
-        matched |= secrets.compare_digest(
-            client_id, expected_id
-        ) & secrets.compare_digest(
-            supplied,
-            expected_key,
-        )
-    return client_id if matched else None
-
-
-class APIError(Exception):
-    def __init__(
-        self,
-        status: int,
-        code: str,
-        message: str,
-        *,
-        task_id: str | None = None,
-        headers: dict[str, str] | None = None,
-    ):
-        self.status = status
-        self.code = code
-        self.message = message
-        self.task_id = task_id
-        self.headers = headers or {}
-
-
-class BodyTooLarge(Exception):
-    pass
-
-
-def error_body(
-    code: str, message: str, request_id: str, task_id: str | None = None
-) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "error": {"code": code, "message": message, "request_id": request_id}
-    }
-    if task_id:
-        body["task_id"] = task_id
-    return body
-
-
-class RequestGuardMiddleware:
-    def __init__(self, app, settings: Callable[[], Settings]):
-        self.app = app
-        self.settings = settings
-        self.active_uploads = 0
-        # ponytail: direct LAN peers keep this map small; add a global sweep if
-        # the service ever accepts high-cardinality public source addresses.
-        self._upload_attempts: dict[str, deque[float]] = {}
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        headers = {key.lower(): value for key, value in scope.get("headers", [])}
-        supplied = headers.get(b"x-request-id")
-        request_id = supplied.decode("latin1") if supplied else str(uuid4())
-        if not 1 <= len(request_id) <= 128 or any(
-            ord(char) < 32 or ord(char) > 126 for char in request_id
-        ):
-            request_id = str(uuid4())
-            await self._response(
-                scope,
-                receive,
-                send,
-                400,
-                error_body("BAD_REQUEST", "X-Request-ID 不合法", request_id),
-                request_id,
-            )
-            return
-        scope.setdefault("state", {})["request_id"] = request_id
-        scope["state"]["started_at"] = monotonic()
-        settings = self.settings()
-        if not settings.dashboard_enabled and (
-            scope["path"] in {"/dashboard", "/dashboard/settings"}
-            or scope["path"].startswith("/static/")
-            or scope["path"].startswith("/v1/dashboard/")
-        ):
-            await self._response(
-                scope,
-                receive,
-                send,
-                404,
-                error_body("NOT_FOUND", "资源未启用", request_id),
-                request_id,
-            )
-            return
-        if _admin_path(scope["path"].rstrip("/") or "/", scope["method"]):
-            if not _valid_admin_key(_admin_key(headers), settings.admin_api_keys):
-                await self._response(
-                    scope,
-                    receive,
-                    send,
-                    401,
-                    error_body("ADMIN_AUTH_REQUIRED", "需要管理员凭证", request_id),
-                    request_id,
-                    {"WWW-Authenticate": 'Basic realm="ZOS Admin"'},
-                )
-                return
-        is_upload = scope["method"] == "POST" and scope["path"].rstrip("/") in {
-            "/v1/uploads",
-            "/v1/uploads/validate",
-        }
-        acquired = False
-        if is_upload:
-            client_id = _client_identity(headers, settings)
-            if client_id is None:
-                await self._response(
-                    scope,
-                    receive,
-                    send,
-                    401,
-                    error_body(
-                        "CLIENT_AUTH_REQUIRED", "需要有效的调用方凭证", request_id
-                    ),
-                    request_id,
-                )
-                return
-            scope["state"]["client_id"] = client_id
-            source = scope.get("client")
-            source_ip = source[0] if source else "unknown"
-            now = monotonic()
-            attempts = self._upload_attempts.setdefault(source_ip, deque())
-            while attempts and attempts[0] <= now - 60:
-                attempts.popleft()
-            if len(attempts) >= settings.upload_rate_limit_per_minute:
-                retry_after = max(1, math.ceil(60 - (now - attempts[0])))
-                await self._response(
-                    scope,
-                    receive,
-                    send,
-                    429,
-                    error_body(
-                        "UPLOAD_RATE_LIMITED", "来源地址上传频率过高", request_id
-                    ),
-                    request_id,
-                    {"Retry-After": str(retry_after)},
-                )
-                return
-            attempts.append(now)
-            if self.active_uploads >= settings.max_concurrent_uploads:
-                await self._response(
-                    scope,
-                    receive,
-                    send,
-                    503,
-                    error_body(
-                        "UPLOAD_CAPACITY_EXCEEDED", "上传并发容量已满", request_id
-                    ),
-                    request_id,
-                    {"Retry-After": "5"},
-                )
-                return
-            self.active_uploads += 1
-            acquired = True
-            content_length = headers.get(b"content-length")
-            if content_length:
-                try:
-                    too_large = int(content_length) > settings.max_request_body_bytes
-                except ValueError:
-                    too_large = True
-                if too_large:
-                    self.active_uploads -= 1
-                    await self._response(
-                        scope,
-                        receive,
-                        send,
-                        413,
-                        error_body("FILE_TOO_LARGE", "请求体超过允许上限", request_id),
-                        request_id,
-                    )
-                    return
-        total = 0
-        started = False
-
-        async def limited_receive():
-            nonlocal total
-            message = await receive()
-            if is_upload and message["type"] == "http.request":
-                total += len(message.get("body", b""))
-                if total > settings.max_request_body_bytes:
-                    raise BodyTooLarge
-            return message
-
-        async def response_send(message):
-            nonlocal started
-            if message["type"] == "http.response.start":
-                started = True
-                message.setdefault("headers", []).append(
-                    (b"x-request-id", request_id.encode("ascii"))
-                )
-            await send(message)
-
-        try:
-            await self.app(scope, limited_receive, response_send)
-        except BodyTooLarge:
-            if not started:
-                await self._response(
-                    scope,
-                    receive,
-                    send,
-                    413,
-                    error_body("FILE_TOO_LARGE", "请求体超过允许上限", request_id),
-                    request_id,
-                )
-        finally:
-            if acquired:
-                self.active_uploads -= 1
-
-    async def _response(
-        self,
-        scope,
-        receive,
-        send,
-        status: int,
-        body: dict,
-        request_id: str,
-        headers: dict[str, str] | None = None,
-    ):
-        response = JSONResponse(body, status, headers=headers)
-        response.headers["X-Request-ID"] = request_id
-        await response(scope, receive, send)
-
-
-def _filename(value: str | None) -> str:
-    name = (value or "unnamed").replace("\\", "/").rsplit("/", 1)[-1]
-    name = "".join(char for char in name if char >= " " and char != "\x7f")
-    return name[:255] or "unnamed"
-
-
-def _extension(filename: str) -> str:
-    suffix = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
-    return suffix if SAFE_EXTENSION.fullmatch(suffix) else ""
-
-
-def _content_type(value: str | None) -> str:
-    if (
-        not value
-        or "/" not in value
-        or len(value) > 255
-        or any(ord(char) < 32 for char in value)
-    ):
-        return "application/octet-stream"
-    return value
-
-
-async def _upload_file(request: Request, runtime: Runtime):
-    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
-        raise APIError(400, "BAD_REQUEST", "上传请求必须使用 multipart/form-data")
-    try:
-        form = await request.form(
-            max_files=2,
-            max_fields=10,
-            max_part_size=runtime.settings.max_upload_bytes + 1,
-        )
-    except BodyTooLarge:
-        raise
-    except Exception as exc:
-        raise APIError(400, "BAD_REQUEST", "multipart 请求格式错误") from exc
-    try:
-        files = form.getlist("file")
-        if not files:
-            raise APIError(400, "FILE_REQUIRED", "缺少 file 字段")
-        if len(files) != 1 or not isinstance(files[0], UploadFile):
-            raise APIError(400, "BAD_REQUEST", "每次请求只能上传一个文件")
-        return form, files[0]
-    except Exception:
-        await form.close()
-        raise
-
-
-async def _source_size(source: UploadFile) -> int:
-    if source.size is None:
-
-        def measure() -> int:
-            source.file.seek(0, 2)
-            size = source.file.tell()
-            source.file.seek(0)
-            return size
-
-        size = await anyio.to_thread.run_sync(measure)
-    else:
-        size = source.size
-        await source.seek(0)
-    return size
-
-
-async def _database_call(method, *args, **kwargs):
-    return await anyio.to_thread.run_sync(partial(method, *args, **kwargs))
 
 
 def _parse_time(value: str | None, name: str) -> datetime | None:
@@ -447,14 +117,6 @@ def _time_range(request: Request, *, maximum_days: int = 31) -> tuple[str, str]:
     if end <= start or end - start > timedelta(days=maximum_days):
         raise APIError(400, "BAD_REQUEST", "时间范围不合法")
     return _iso(start), _iso(end)
-
-
-def _request_id(request: Request) -> str:
-    return request.state.request_id
-
-
-def _duration(request: Request) -> int:
-    return round((monotonic() - request.state.started_at) * 1_000)
 
 
 def _task_item(task: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
@@ -488,190 +150,6 @@ def _task_item(task: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     return item
 
 
-def _upload_response(
-    task: dict[str, Any], delete_token: str | None = None
-) -> dict[str, Any]:
-    return {
-        "task_id": task["id"],
-        "storage_preset": task["storage_preset"],
-        "key": task["object_key"],
-        "url": task["public_url"],
-        "size_bytes": task["size_bytes"],
-        "content_type": task["content_type"],
-        "etag": task["etag"],
-        "version_id": task["version_id"],
-        "delete_capability_available": (
-            delete_token is not None or task.get("delete_token_hash") is not None
-        ),
-        "delete_token": delete_token,
-    }
-
-
-def _provider_status(error: ProviderError) -> int:
-    if error.code == "STORAGE_PRESET_NOT_FOUND":
-        return 404
-    if error.code == "STORAGE_PRESET_DISABLED":
-        return 409
-    if error.code in {
-        "STORAGE_CONFIG_INVALID",
-        "STORAGE_CREDENTIALS_REQUIRED",
-        "STORAGE_ENDPOINT_FORBIDDEN",
-    }:
-        return 400
-    if error.code in {
-        "STORAGE_DEFAULT_NOT_CONFIGURED",
-        "STORAGE_METRICS_UNAVAILABLE",
-        "STORAGE_NOT_CONFIGURED",
-    }:
-        return 503
-    return 502
-
-
-def _existing_upload(
-    task: dict[str, Any], requested_preset: str | None
-) -> JSONResponse:
-    if requested_preset is not None and requested_preset != task["storage_preset"]:
-        raise APIError(
-            409,
-            "IDEMPOTENCY_SCOPE_MISMATCH",
-            "该幂等键已绑定其他存储预设",
-            task_id=task["id"],
-        )
-    if task["status"] == "succeeded":
-        response = _no_store(_upload_response(task))
-        response.headers["Idempotency-Replayed"] = "true"
-        return response
-    code = (
-        "IDEMPOTENCY_KEY_REUSED" if task["status"] == "failed" else "UPLOAD_IN_PROGRESS"
-    )
-    raise APIError(
-        409,
-        code,
-        "该幂等键已经绑定上传任务",
-        task_id=task["id"],
-    )
-
-
-def _deleted_response(
-    task: dict[str, Any], *, already_deleted: bool, already_absent: bool
-) -> JSONResponse:
-    return _no_store(
-        {
-            "task_id": task["id"],
-            "key": task["object_key"],
-            "object_status": "deleted",
-            "deleted_at": task["deleted_at"],
-            "already_deleted": already_deleted,
-            "already_absent": already_absent,
-        }
-    )
-
-
-def _deletion_gate(task: dict[str, Any]) -> JSONResponse | None:
-    if task["object_status"] == "deleted":
-        return _deleted_response(task, already_deleted=True, already_absent=False)
-    if task["object_status"] in {"deleting", "delete_unknown"}:
-        raise APIError(
-            409,
-            "DELETE_IN_PROGRESS",
-            "对象正在删除或等待确认",
-            task_id=task["id"],
-        )
-    if task["status"] != "succeeded" or task["object_status"] != "present":
-        raise APIError(
-            409,
-            "OBJECT_NOT_DELETABLE",
-            "任务当前不允许严格删除",
-            task_id=task["id"],
-        )
-    return None
-
-
-async def _save_deletion(
-    runtime: Runtime,
-    request_id: str,
-    task: dict[str, Any],
-    provider_result: str,
-    **changes: Any,
-) -> None:
-    try:
-        await _database_call(runtime.database.update_task, task["id"], **changes)
-    except sqlite3.Error as exc:
-        runtime.log.emit(
-            50,
-            "database_error",
-            "对象删除结果写入失败",
-            request_id=request_id,
-            task_id=task["id"],
-            error_code="DATABASE_ERROR",
-        )
-        raise APIError(
-            500,
-            "DATABASE_ERROR",
-            "对象删除状态无法安全写入",
-            task_id=task["id"],
-        ) from exc
-    to_status = changes["object_status"]
-    error_code = changes.get("delete_error_code")
-    event = (
-        "object_delete_succeeded"
-        if to_status == "deleted"
-        else "object_delete_pending"
-        if to_status == "delete_unknown"
-        else "object_delete_changed"
-        if error_code == "OBJECT_CHANGED"
-        else "object_delete_failed"
-    )
-    runtime.log.emit(
-        NOTIFY,
-        event,
-        "对象删除状态已更新",
-        request_id=request_id,
-        task_id=task["id"],
-        error_code=error_code,
-        details={
-            "from_status": "deleting",
-            "to_status": to_status,
-            "provider_result": provider_result,
-            "object_key": task["object_key"],
-            "size_bytes": task["size_bytes"],
-            "etag": task["etag"],
-            "version_id": task["version_id"],
-            "storage_config_id": task["storage_config_id"],
-        },
-    )
-
-
-async def _delete_pending(
-    runtime: Runtime,
-    request: Request,
-    task: dict[str, Any],
-    provider_result: str = "uncertain",
-) -> JSONResponse:
-    await _save_deletion(
-        runtime,
-        _request_id(request),
-        task,
-        provider_result,
-        object_status="delete_unknown",
-        delete_error_code="DELETE_PENDING",
-    )
-    body = error_body(
-        "DELETE_PENDING",
-        "删除结果暂时无法确认",
-        _request_id(request),
-    )
-    return _no_store(
-        {
-            "task_id": task["id"],
-            "key": task["object_key"],
-            "object_status": "delete_unknown",
-            "error": body["error"],
-        },
-        status_code=202,
-    )
-
-
 def _settings_request(request: Request) -> None:
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
         raise APIError(400, "STORAGE_CONFIG_INVALID", "设置请求必须使用 JSON")
@@ -684,18 +162,6 @@ def _settings_request(request: Request) -> None:
         actual = f"{parsed.scheme}://{parsed.netloc}"
         if actual != expected:
             raise APIError(400, "STORAGE_CONFIG_INVALID", "设置请求 Origin 不合法")
-
-
-def _preset_key(value: str) -> str:
-    if not SAFE_PRESET_KEY.fullmatch(value):
-        raise APIError(400, "STORAGE_PRESET_INVALID", "preset_key 格式不合法")
-    return value
-
-
-def _no_store(body: Any, status_code: int = 200) -> JSONResponse:
-    return JSONResponse(
-        body, status_code=status_code, headers={"Cache-Control": "no-store"}
-    )
 
 
 def create_app(
@@ -985,28 +451,8 @@ def create_app(
         x_client_id: str | None = Header(default=None, alias="X-Client-ID"),
         x_client_key: str | None = Header(default=None, alias="X-Client-Key"),
     ):
-        runtime: Runtime = request.app.state.runtime
         del x_client_id, x_client_key
-        form, source = await _upload_file(request, runtime)
-        try:
-            filename = _filename(source.filename)
-            content_type = _content_type(source.content_type)
-            size = await _source_size(source)
-            if size > runtime.settings.max_upload_bytes:
-                raise APIError(413, "FILE_TOO_LARGE", "文件不能超过 200 MiB")
-            if size == 0:
-                raise APIError(400, "FILE_EMPTY", "文件不能为空")
-            return {
-                "received": True,
-                "uploaded_to_storage": False,
-                "recorded_as_task": False,
-                "filename": filename,
-                "content_type": content_type,
-                "size_bytes": size,
-                "request_id": _request_id(request),
-            }
-        finally:
-            await form.close()
+        return await process_validate_upload(request, request.app.state.runtime)
 
     @app.post("/v1/uploads", response_model=UploadResponse)
     async def upload(
@@ -1015,241 +461,10 @@ def create_app(
         x_client_id: str | None = Header(default=None, alias="X-Client-ID"),
         x_client_key: str | None = Header(default=None, alias="X-Client-Key"),
     ):
-        runtime: Runtime = request.app.state.runtime
         del x_client_id, x_client_key
-        client_id = request.state.client_id
-        idempotency = request.headers.get("idempotency-key")
-        if idempotency is not None:
-            if not 1 <= len(idempotency) <= 128 or any(
-                ord(char) < 33 or ord(char) > 126 for char in idempotency
-            ):
-                raise APIError(400, "BAD_REQUEST", "Idempotency-Key 不合法")
-            existing = await _database_call(
-                runtime.database.task_by_idempotency, client_id, idempotency
-            )
-            if existing:
-                return _existing_upload(existing, x_storage_preset)
-        if x_storage_preset is not None:
-            x_storage_preset = _preset_key(x_storage_preset)
-        try:
-            snapshot = runtime.resolve_upload_snapshot(x_storage_preset)
-        except ProviderError as exc:
-            raise APIError(_provider_status(exc), exc.code, exc.message) from exc
-        provider = snapshot.provider
-        form, source = await _upload_file(request, runtime)
-        try:
-            filename = _filename(source.filename)
-            content_type = _content_type(source.content_type)
-            size = await _source_size(source)
-        except Exception:
-            await form.close()
-            raise
-        task_id = str(uuid4())
-        date = datetime.now(ZoneInfo(runtime.settings.app_timezone)).strftime(
-            "%Y/%m/%d"
+        return await process_upload(
+            request, request.app.state.runtime, x_storage_preset
         )
-        extension = _extension(filename)
-        object_key = f"{date}/{task_id}{'.' + extension if extension else ''}"
-        public_url = provider.build_public_url(object_key)
-        task = {
-            "id": task_id,
-            "request_id": _request_id(request),
-            "client_id": client_id,
-            "idempotency_key": idempotency,
-            "storage_config_id": snapshot.storage_config_id,
-            "filename": filename,
-            "content_type": content_type,
-            "object_key": object_key,
-            "public_url": public_url,
-            "status": "uploading",
-            "size_bytes": size,
-            "error_code": None,
-            "created_at": utc_now(),
-            "finished_at": None,
-            "duration_ms": None,
-        }
-        try:
-            if size == 0 or size > runtime.settings.max_upload_bytes:
-                await _database_call(runtime.database.create_task, task)
-            else:
-                await _database_call(
-                    runtime.database.create_task_with_quota,
-                    task,
-                    max_objects=runtime.settings.client_max_objects,
-                    max_bytes=runtime.settings.client_max_bytes,
-                )
-        except QuotaExceeded as exc:
-            existing = await _database_call(
-                runtime.database.task_by_idempotency, client_id, idempotency
-            )
-            await form.close()
-            if existing:
-                return _existing_upload(existing, snapshot.preset_key)
-            raise APIError(
-                429,
-                "CLIENT_QUOTA_EXCEEDED",
-                "调用方对象数量或字节配额已满",
-                headers={"Retry-After": "3600"},
-            ) from exc
-        except sqlite3.IntegrityError:
-            existing = await _database_call(
-                runtime.database.task_by_idempotency, client_id, idempotency
-            )
-            if existing:
-                await form.close()
-                return _existing_upload(existing, snapshot.preset_key)
-            await form.close()
-            raise APIError(
-                409,
-                "UPLOAD_IN_PROGRESS",
-                "该幂等键已经绑定上传任务",
-                task_id=existing["id"] if existing else None,
-            )
-        except sqlite3.Error as exc:
-            await form.close()
-            raise APIError(500, "DATABASE_ERROR", "无法创建上传任务") from exc
-        runtime.log.emit(
-            NOTIFY,
-            "upload_started",
-            "上传任务已开始",
-            request_id=task["request_id"],
-            task_id=task_id,
-            details={
-                "filename": filename,
-                "object_key": object_key,
-                "storage_preset": snapshot.preset_key,
-            },
-        )
-        try:
-            if size > runtime.settings.max_upload_bytes:
-                await _database_call(
-                    runtime.database.update_task,
-                    task_id,
-                    status="failed",
-                    size_bytes=size,
-                    object_status="absent",
-                    error_code="FILE_TOO_LARGE",
-                    finished_at=utc_now(),
-                    duration_ms=_duration(request),
-                )
-                raise APIError(
-                    413,
-                    "FILE_TOO_LARGE",
-                    "文件不能超过 200 MiB",
-                    task_id=task_id,
-                )
-            if size == 0:
-                await _database_call(
-                    runtime.database.update_task,
-                    task_id,
-                    status="failed",
-                    size_bytes=0,
-                    object_status="absent",
-                    error_code="FILE_EMPTY",
-                    finished_at=utc_now(),
-                    duration_ms=_duration(request),
-                )
-                raise APIError(400, "FILE_EMPTY", "文件不能为空", task_id=task_id)
-            try:
-                await anyio.to_thread.run_sync(
-                    provider.upload_file, source.file, object_key, content_type
-                )
-            except ProviderError as exc:
-                status = "unknown" if exc.uncertain else "failed"
-                await _database_call(
-                    runtime.database.update_task,
-                    task_id,
-                    status=status,
-                    size_bytes=size,
-                    object_status="pending" if exc.uncertain else "absent",
-                    error_code=exc.code,
-                    finished_at=utc_now() if status == "failed" else None,
-                    duration_ms=_duration(request),
-                )
-                raise APIError(502, exc.code, exc.message, task_id=task_id) from exc
-            try:
-                metadata = await anyio.to_thread.run_sync(
-                    provider.head_object, object_key
-                )
-                if metadata is None:
-                    raise ProviderError(
-                        "UPLOAD_CONFIRMATION_PENDING",
-                        "上传已返回成功，但暂时无法确认远端对象",
-                        uncertain=True,
-                    )
-                require_upload_metadata(metadata, size)
-            except ProviderError as exc:
-                await _database_call(
-                    runtime.database.update_task,
-                    task_id,
-                    status="unknown",
-                    size_bytes=size,
-                    object_status="pending",
-                    error_code=exc.code,
-                    duration_ms=_duration(request),
-                )
-                raise APIError(502, exc.code, exc.message, task_id=task_id) from exc
-            duration = _duration(request)
-            delete_token, delete_token_hash = issue_delete_token()
-            try:
-                await _database_call(
-                    runtime.database.update_task,
-                    task_id,
-                    status="succeeded",
-                    size_bytes=metadata.size_bytes,
-                    etag=metadata.etag,
-                    version_id=metadata.version_id,
-                    delete_token_hash=delete_token_hash,
-                    object_status="present",
-                    error_code=None,
-                    finished_at=utc_now(),
-                    duration_ms=duration,
-                )
-            except sqlite3.Error as exc:
-                runtime.log.emit(
-                    50,
-                    "database_error",
-                    "对象已上传但任务状态写入失败",
-                    request_id=task["request_id"],
-                    task_id=task_id,
-                    error_code="DATABASE_ERROR",
-                )
-                raise APIError(
-                    500,
-                    "DATABASE_ERROR",
-                    "对象已上传但任务状态写入失败",
-                    task_id=task_id,
-                ) from exc
-            runtime.log.emit(
-                NOTIFY,
-                "upload_succeeded",
-                "上传任务成功",
-                request_id=task["request_id"],
-                task_id=task_id,
-                details={
-                    "filename": filename,
-                    "content_type": content_type,
-                    "size_bytes": size,
-                    "object_key": object_key,
-                    "duration_ms": duration,
-                    "storage_preset": snapshot.preset_key,
-                    "storage_provider": snapshot.provider_id,
-                    "storage_config_revision": snapshot.revision,
-                },
-            )
-            task.update(
-                storage_preset=snapshot.preset_key,
-                size_bytes=metadata.size_bytes,
-                etag=metadata.etag,
-                version_id=metadata.version_id,
-            )
-            return JSONResponse(
-                _upload_response(task, delete_token),
-                status_code=201,
-                headers={"Cache-Control": "no-store"},
-            )
-        finally:
-            await form.close()
 
     @app.get("/v1/upload-tasks", response_model=TaskListResponse)
     async def tasks(request: Request):
@@ -1312,237 +527,11 @@ def create_app(
         task_id: str,
         x_delete_token: str | None = Header(default=None, alias="X-Delete-Token"),
     ):
-        try:
-            UUID(task_id)
-        except ValueError as exc:
-            raise APIError(400, "BAD_REQUEST", "任务 ID 不合法") from exc
-        if request.headers.get("transfer-encoding") or request.headers.get(
-            "content-length"
-        ) not in {None, "0"}:
-            raise APIError(400, "BAD_REQUEST", "删除请求不能包含请求体")
-        runtime: Runtime = request.app.state.runtime
-        task = await _database_call(runtime.database.task_by_id, task_id)
-        if task is None:
-            raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
-        admin_cleanup = request.url.path.startswith("/v1/admin/")
-        deletable_status = "present_unclaimed" if admin_cleanup else "present"
-        if admin_cleanup:
-            if (
-                task["status"] != "succeeded"
-                or task["object_status"] != "present_unclaimed"
-                or task.get("delete_token_hash") is not None
-            ):
-                raise APIError(
-                    409,
-                    "OBJECT_NOT_UNCLAIMED",
-                    "任务不是可管理清理的无凭证对象",
-                    task_id=task_id,
-                )
-        else:
-            if not matches_delete_token(x_delete_token, task.get("delete_token_hash")):
-                raise APIError(
-                    403,
-                    "DELETE_TOKEN_INVALID",
-                    "删除凭证无效",
-                    task_id=task_id,
-                )
-            existing = _deletion_gate(task)
-            if existing:
-                return existing
-        try:
-            claim = (
-                runtime.database.claim_unclaimed_deletion
-                if admin_cleanup
-                else runtime.database.claim_task_deletion
-            )
-            claimed = await _database_call(
-                claim, task_id, _request_id(request), utc_now()
-            )
-        except sqlite3.Error as exc:
-            raise APIError(
-                500,
-                "DATABASE_ERROR",
-                "无法开始对象删除",
-                task_id=task_id,
-            ) from exc
-        if not claimed:
-            current = await _database_call(runtime.database.task_by_id, task_id)
-            if current is None:
-                raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
-            if admin_cleanup:
-                raise APIError(
-                    409,
-                    "OBJECT_NOT_UNCLAIMED",
-                    "无凭证对象状态已改变",
-                    task_id=task_id,
-                )
-            result = _deletion_gate(current)
-            if result:
-                return result
-            raise APIError(
-                409,
-                "DELETE_IN_PROGRESS",
-                "对象删除状态已改变",
-                task_id=task_id,
-            )
-        runtime.log.emit(
-            NOTIFY,
-            "object_delete_started",
-            "对象删除已开始",
-            request_id=_request_id(request),
-            task_id=task_id,
-            details={
-                "from_status": deletable_status,
-                "to_status": "deleting",
-                "provider_result": None,
-                "object_key": task["object_key"],
-                "size_bytes": task["size_bytes"],
-                "etag": task["etag"],
-                "version_id": task["version_id"],
-                "storage_config_id": task["storage_config_id"],
-            },
-        )
-        try:
-            provider = runtime.provider_for_config(task["storage_config_id"])
-        except Exception as exc:
-            await _save_deletion(
-                runtime,
-                _request_id(request),
-                task,
-                "config_unavailable",
-                object_status=deletable_status,
-                delete_error_code="STORAGE_CONFIG_UNAVAILABLE",
-            )
-            raise APIError(
-                503,
-                "STORAGE_CONFIG_UNAVAILABLE",
-                "任务原存储配置不可用",
-                task_id=task_id,
-            ) from exc
-        try:
-            metadata = await anyio.to_thread.run_sync(
-                provider.head_object, task["object_key"], task["version_id"]
-            )
-        except ProviderError as exc:
-            if exc.uncertain:
-                return await _delete_pending(runtime, request, task, exc.code)
-            await _save_deletion(
-                runtime,
-                _request_id(request),
-                task,
-                exc.code,
-                object_status=deletable_status,
-                delete_error_code="DELETE_FAILED",
-            )
-            raise APIError(
-                502,
-                "DELETE_FAILED",
-                "无法读取待删除对象",
-                task_id=task_id,
-            ) from exc
-        if metadata is None:
-            deleted_at = utc_now()
-            await _save_deletion(
-                runtime,
-                _request_id(request),
-                task,
-                "already_absent",
-                object_status="deleted",
-                delete_error_code=None,
-                deleted_at=deleted_at,
-            )
-            return _deleted_response(
-                task | {"deleted_at": deleted_at},
-                already_deleted=False,
-                already_absent=True,
-            )
-        if not matches_object_metadata(
-            metadata,
-            task["size_bytes"],
-            task["etag"],
-            task["version_id"],
-        ):
-            await _save_deletion(
-                runtime,
-                _request_id(request),
-                task,
-                "metadata_mismatch",
-                object_status=deletable_status,
-                delete_error_code="OBJECT_CHANGED",
-            )
-            raise APIError(
-                409,
-                "OBJECT_CHANGED",
-                "远端对象与上传记录不一致",
-                task_id=task_id,
-            )
-        try:
-            await anyio.to_thread.run_sync(
-                provider.delete_object, task["object_key"], task["version_id"]
-            )
-        except ProviderError as exc:
-            if exc.uncertain:
-                return await _delete_pending(runtime, request, task, exc.code)
-            await _save_deletion(
-                runtime,
-                _request_id(request),
-                task,
-                exc.code,
-                object_status=deletable_status,
-                delete_error_code="DELETE_FAILED",
-            )
-            raise APIError(
-                502,
-                "DELETE_FAILED",
-                "Storage Provider 拒绝删除",
-                task_id=task_id,
-            ) from exc
-        try:
-            remaining = await anyio.to_thread.run_sync(
-                provider.head_object, task["object_key"], task["version_id"]
-            )
-        except ProviderError:
-            return await _delete_pending(
-                runtime, request, task, "post_delete_head_error"
-            )
-        if remaining is not None:
-            if not matches_object_metadata(
-                remaining,
-                task["size_bytes"],
-                task["etag"],
-                task["version_id"],
-            ):
-                return await _delete_pending(
-                    runtime, request, task, "post_delete_object_changed"
-                )
-            await _save_deletion(
-                runtime,
-                _request_id(request),
-                task,
-                "still_present",
-                object_status=deletable_status,
-                delete_error_code="DELETE_FAILED",
-            )
-            raise APIError(
-                502,
-                "DELETE_FAILED",
-                "删除后对象仍然存在",
-                task_id=task_id,
-            )
-        deleted_at = utc_now()
-        await _save_deletion(
-            runtime,
-            _request_id(request),
-            task,
-            "confirmed_absent",
-            object_status="deleted",
-            delete_error_code=None,
-            deleted_at=deleted_at,
-        )
-        return _deleted_response(
-            task | {"deleted_at": deleted_at},
-            already_deleted=False,
-            already_absent=False,
+        return await process_delete_task_object(
+            request,
+            request.app.state.runtime,
+            task_id,
+            x_delete_token,
         )
 
     @app.get("/v1/dashboard/summary", response_model=DashboardSummaryResponse)

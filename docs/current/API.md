@@ -3,7 +3,7 @@ status: current
 target_version: v3
 implementation_baseline: API v1
 database_schema: v5
-implementation_status: phase6_quality_ready
+implementation_status: maintenance_baseline_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）

@@ -1413,7 +1413,7 @@ def test_database_write_wait_does_not_block_task_queries(client, database, monke
 
 
 def test_upload_path_reuses_framework_spool_without_second_copy():
-    source = (Path(__file__).resolve().parents[1] / "app/main.py").read_text()
+    source = (Path(__file__).resolve().parents[1] / "app/uploads.py").read_text()
 
     assert "SpooledTemporaryFile" not in source
     assert "_copy_upload" not in source
