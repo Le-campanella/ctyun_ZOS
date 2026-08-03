@@ -147,3 +147,17 @@
 ### 下一步：Phase 3
 
 - 为启动恢复增加预算、批次与并发，暴露 backlog；让 EventLogger 与公开运行配置真实进入 readiness。
+
+### 已完成：Phase 3 有界恢复、超时与 readiness
+
+- 启动恢复使用时间预算；每轮最多处理固定 batch，并按最大并发分组执行，剩余 backlog 交给后台 supervisor 后续轮次，不再顺序扫描全部历史任务。
+- 恢复使用独立 Provider 实例与短 connect/read/retry 配置；普通上传 Provider 的长超时不再决定启动恢复上限。
+- SQLite 提供 backlog 聚合：待恢复上传、待恢复删除、总数、最旧时间与年龄；`/readyz` 同时返回最近恢复成功时间。
+- `EventLogger` 记录最近持久化成功/失败时间，成功写入会清除 degraded；日志持久化失败使 readiness 降级。
+- `DASHBOARD_ENABLED=false` 时 Dashboard 页面、静态资源和 Dashboard API 返回 404；未实际生效的 `REQUEST_TIMEOUT_SECONDS` 已删除。
+- 100 个不可达恢复任务测试确认单轮只发出 25 个 HeadObject，HTTP 服务完成启动并可观察剩余 backlog；Phase 0 对应 xfail 已转为通过。
+- 完整容器测试目标现为 83 项通过、仅保留 Phase 4 的 2 项部署回滚 xfail；最终全量结果在本 Phase 提交前再次确认。
+
+### 下一步：Phase 4
+
+- 为部署增加远程锁、maintenance/drain、所有失败路径数据库回滚、首次失败清理和备份保留；让 verify/restore 不依赖运行容器。

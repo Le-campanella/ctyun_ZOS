@@ -721,7 +721,17 @@ HTTP/1.1 200 OK
     "recovery": {
       "status": "ok",
       "completed": true,
-      "pending_tasks": 0
+      "last_success_at": "2026-07-29T06:30:55Z",
+      "pending_uploads": 0,
+      "pending_deletions": 0,
+      "pending_tasks": 0,
+      "oldest_created_at": null,
+      "oldest_age_seconds": null
+    },
+    "event_log": {
+      "status": "ok",
+      "last_failure_at": null,
+      "last_success_at": "2026-07-29T06:30:55Z"
     },
     "storage": {
       "status": "ok",
@@ -765,7 +775,14 @@ HTTP/1.1 503 Service Unavailable
     "recovery": {
       "status": "ok",
       "completed": true,
+      "pending_uploads": 0,
+      "pending_deletions": 0,
       "pending_tasks": 0
+    },
+    "event_log": {
+      "status": "ok",
+      "last_failure_at": null,
+      "last_success_at": "2026-07-29T06:30:55Z"
     },
     "storage": {
       "status": "ok",

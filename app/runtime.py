@@ -65,9 +65,11 @@ class Runtime:
         self._active_lock = threading.RLock()
         self._snapshots_by_key: dict[str, StorageSnapshot] = {}
         self._providers_by_config_id: dict[str, StorageProvider] = {}
+        self._recovery_providers_by_config_id: dict[str, StorageProvider] = {}
         self._default_preset_key: str | None = None
         self.schema_ready = False
         self.recovery_complete = False
+        self.last_recovery_success_at: str | None = None
         self.last_probe: dict[str, Any] = {
             "status": "pending",
             "last_checked_at": None,
@@ -104,7 +106,7 @@ class Runtime:
         )
         await self._bootstrap_storage()
         self._load_active()
-        await self.recover()
+        await self.recover(initial=True)
         self._background_succeeded("recovery")
         await self.probe()
         self._background_succeeded("probe")
@@ -193,8 +195,10 @@ class Runtime:
         provider_type = self.registry.get(
             record["provider"], record["provider_schema_version"]
         )
+        config = json.loads(record["config_json"])
+        validate_endpoint_access(config["endpoint_url"], self.settings)
         provider = provider_type(
-            json.loads(record["config_json"]),
+            config,
             self.cipher.decrypt(record["credentials_ciphertext"]),
             self.settings,
         )
@@ -213,6 +217,35 @@ class Runtime:
                 "RECOVERY_PENDING", "任务对应的存储配置不存在", uncertain=True
             )
         return self.provider_for_record(record)
+
+    def recovery_provider_for_config(self, config_id: str) -> StorageProvider:
+        with self._active_lock:
+            cached = self._recovery_providers_by_config_id.get(config_id)
+        if cached is not None:
+            return cached
+        record = self.database.storage_by_id(config_id)
+        if record is None:
+            raise ProviderError(
+                "RECOVERY_PENDING", "任务对应的存储配置不存在", uncertain=True
+            )
+        config = json.loads(record["config_json"])
+        validate_endpoint_access(config["endpoint_url"], self.settings)
+        config.update(
+            connect_timeout_seconds=self.settings.recovery_connect_timeout_seconds,
+            read_timeout_seconds=self.settings.recovery_read_timeout_seconds,
+            max_attempts=self.settings.recovery_max_attempts,
+        )
+        provider_type = self.registry.get(
+            record["provider"], record["provider_schema_version"]
+        )
+        provider = provider_type(
+            config,
+            self.cipher.decrypt(record["credentials_ciphertext"]),
+            self.settings,
+        )
+        with self._active_lock:
+            self._recovery_providers_by_config_id[config_id] = provider
+        return provider
 
     def active_snapshot(self, preset_key: str | None = None) -> StorageSnapshot | None:
         with self._active_lock:
@@ -643,71 +676,95 @@ class Runtime:
                 "error_code": None,
             }
 
-    async def recover(self) -> None:
+    async def recover(self, initial: bool = False) -> None:
         self.recovery_complete = False
         stale_upload = (
             datetime.now(UTC) - timedelta(seconds=self.settings.stale_upload_seconds)
         ).isoformat().replace("+00:00", "Z")
-        tasks = self.database.pending_tasks(stale_upload)
-        for task in tasks:
-            try:
-                provider = self.provider_for_config(task["storage_config_id"])
-                metadata = await anyio.to_thread.run_sync(
-                    provider.head_object, task["object_key"]
-                )
-                if metadata is None:
-                    self.database.update_task(
-                        task["id"],
-                        status="failed",
-                        object_status="absent",
-                        error_code="SERVICE_RESTARTED_OBJECT_NOT_FOUND",
-                        finished_at=utc_now(),
-                    )
-                else:
-                    if task["size_bytes"] is not None:
-                        require_upload_metadata(metadata, task["size_bytes"])
-                    object_status = (
-                        "present"
-                        if task.get("delete_token_hash") is not None
-                        else "present_unclaimed"
-                    )
-                    self.database.update_task(
-                        task["id"],
-                        status="succeeded",
-                        size_bytes=metadata.size_bytes,
-                        etag=metadata.etag,
-                        version_id=metadata.version_id,
-                        object_status=object_status,
-                        error_code=None,
-                        finished_at=utc_now(),
-                    )
-            except ProviderError as exc:
-                self.database.update_task(
-                    task["id"],
-                    status="unknown",
-                    object_status="pending",
-                    error_code=exc.code
-                    if exc.code == "OBJECT_SIZE_MISMATCH"
-                    else "RECOVERY_PENDING",
-                )
-            except Exception:
-                self.database.update_task(
-                    task["id"],
-                    status="unknown",
-                    object_status="pending",
-                    error_code="RECOVERY_PENDING",
-                )
         stale_delete = (
             datetime.now(UTC) - timedelta(seconds=self.settings.stale_delete_seconds)
         ).isoformat().replace("+00:00", "Z")
-        for task in self.database.pending_deletions(stale_delete):
-            await self._recover_deletion(task)
+        tasks = self.database.pending_tasks(
+            stale_upload, self.settings.recovery_batch_size
+        )
+        remaining = max(0, self.settings.recovery_batch_size - len(tasks))
+        work = [("upload", task) for task in tasks] + [
+            ("delete", task)
+            for task in self.database.pending_deletions(stale_delete, remaining)
+        ]
+        deadline = (
+            monotonic() + self.settings.recovery_initial_budget_seconds
+            if initial
+            else None
+        )
+        width = self.settings.recovery_max_concurrency
+        for offset in range(0, len(work), width):
+            if deadline is not None and offset and monotonic() >= deadline:
+                break
+            await asyncio.gather(
+                *(
+                    self._recover_upload(task)
+                    if kind == "upload"
+                    else self._recover_deletion(task)
+                    for kind, task in work[offset : offset + width]
+                )
+            )
         self.recovery_complete = True
+        self.last_recovery_success_at = utc_now()
+
+    async def _recover_upload(self, task: dict[str, Any]) -> None:
+        try:
+            provider = self.recovery_provider_for_config(task["storage_config_id"])
+            metadata = await anyio.to_thread.run_sync(
+                provider.head_object, task["object_key"]
+            )
+            if metadata is None:
+                self.database.update_task(
+                    task["id"],
+                    status="failed",
+                    object_status="absent",
+                    error_code="SERVICE_RESTARTED_OBJECT_NOT_FOUND",
+                    finished_at=utc_now(),
+                )
+            else:
+                if task["size_bytes"] is not None:
+                    require_upload_metadata(metadata, task["size_bytes"])
+                object_status = (
+                    "present"
+                    if task.get("delete_token_hash") is not None
+                    else "present_unclaimed"
+                )
+                self.database.update_task(
+                    task["id"],
+                    status="succeeded",
+                    size_bytes=metadata.size_bytes,
+                    etag=metadata.etag,
+                    version_id=metadata.version_id,
+                    object_status=object_status,
+                    error_code=None,
+                    finished_at=utc_now(),
+                )
+        except ProviderError as exc:
+            self.database.update_task(
+                task["id"],
+                status="unknown",
+                object_status="pending",
+                error_code=exc.code
+                if exc.code == "OBJECT_SIZE_MISMATCH"
+                else "RECOVERY_PENDING",
+            )
+        except Exception:
+            self.database.update_task(
+                task["id"],
+                status="unknown",
+                object_status="pending",
+                error_code="RECOVERY_PENDING",
+            )
 
     async def _recover_deletion(self, task: dict[str, Any]) -> None:
         from_status = task["object_status"]
         try:
-            provider = self.provider_for_config(task["storage_config_id"])
+            provider = self.recovery_provider_for_config(task["storage_config_id"])
             metadata = await anyio.to_thread.run_sync(
                 provider.head_object, task["object_key"], task["version_id"]
             )
@@ -815,6 +872,44 @@ class Runtime:
         if storage["status"] == "ok" and not probe_ok:
             storage["status"] = "degraded"
             storage["error_code"] = "STORAGE_PROBE_STALE"
+        now = datetime.now(UTC)
+        stale_upload = (now - timedelta(seconds=self.settings.stale_upload_seconds)).isoformat()
+        stale_delete = (now - timedelta(seconds=self.settings.stale_delete_seconds)).isoformat()
+        try:
+            backlog = self.database.recovery_backlog(stale_upload, stale_delete)
+            backlog_ok = True
+        except Exception:
+            backlog = {
+                "pending_uploads": None,
+                "pending_deletions": None,
+                "pending_tasks": None,
+                "oldest_created_at": None,
+            }
+            backlog_ok = False
+        try:
+            backlog["oldest_age_seconds"] = max(
+                0,
+                round(
+                    (
+                        now
+                        - datetime.fromisoformat(
+                            backlog["oldest_created_at"].replace("Z", "+00:00")
+                        )
+                    ).total_seconds()
+                ),
+            )
+        except (AttributeError, TypeError, ValueError):
+            backlog["oldest_age_seconds"] = None
+        recovery_ok = (
+            self.recovery_complete
+            and backlog_ok
+            and backlog["pending_tasks"] == 0
+        )
+        event_log = {
+            "status": "degraded" if self.log.degraded else "ok",
+            "last_failure_at": self.log.last_failure_at,
+            "last_success_at": self.log.last_success_at,
+        }
         checks = {
             "config": {
                 "status": "ok" if snapshot else "error",
@@ -834,11 +929,12 @@ class Runtime:
             },
             "schema": {"status": "ok" if self.schema_ready else "pending"},
             "recovery": {
-                "status": "ok" if self.recovery_complete else "pending",
+                "status": "ok" if recovery_ok else "degraded" if self.recovery_complete else "pending",
                 "completed": self.recovery_complete,
-                "pending_tasks": len(self.database.pending_tasks())
-                + len(self.database.pending_deletions(utc_now())),
+                "last_success_at": self.last_recovery_success_at,
+                **backlog,
             },
+            "event_log": event_log,
             "storage": storage,
         }
         if self.background_enabled:
@@ -851,9 +947,10 @@ class Runtime:
             and database["status"] == "ok"
             and temp_ok
             and self.schema_ready
-            and self.recovery_complete
+            and recovery_ok
             and probe_ok
             and background_ok
+            and not self.log.degraded
         )
         code = "STORAGE_NOT_CONFIGURED" if snapshot is None else "NOT_READY"
         return ready, checks, code

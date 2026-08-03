@@ -1040,20 +1040,32 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def pending_tasks(self, stale_before: str | None = None) -> list[dict[str, Any]]:
+    def pending_tasks(
+        self, stale_before: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM upload_tasks WHERE status='unknown'"
-        values: tuple[Any, ...] = ()
+        values: list[Any] = []
         if stale_before:
             query += " OR (status='uploading' AND created_at<?)"
-            values = (stale_before,)
+            values.append(stale_before)
+        query += " ORDER BY created_at, id"
+        if limit is not None:
+            query += " LIMIT ?"
+            values.append(limit)
         with closing(self.connect()) as connection:
             rows = connection.execute(query, values).fetchall()
         return [dict(row) for row in rows]
 
-    def pending_deletions(self, stale_before: str) -> list[dict[str, Any]]:
+    def pending_deletions(
+        self, stale_before: str, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        limit_clause = " LIMIT ?" if limit is not None else ""
+        values: tuple[Any, ...] = (
+            (stale_before, limit) if limit is not None else (stale_before,)
+        )
         with closing(self.connect()) as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM upload_tasks
                 WHERE object_status='delete_unknown'
                 OR (
@@ -1061,10 +1073,43 @@ class Database:
                     AND delete_started_at<?
                 )
                 ORDER BY delete_started_at, id
+                {limit_clause}
                 """,
-                (stale_before,),
+                values,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def recovery_backlog(
+        self, stale_upload_before: str, stale_delete_before: str
+    ) -> dict[str, Any]:
+        with closing(self.connect()) as connection:
+            uploads = connection.execute(
+                """
+                SELECT COUNT(*), MIN(created_at) FROM upload_tasks
+                WHERE status='unknown'
+                   OR (status='uploading' AND created_at<?)
+                """,
+                (stale_upload_before,),
+            ).fetchone()
+            deletions = connection.execute(
+                """
+                SELECT COUNT(*), MIN(COALESCE(delete_started_at, created_at))
+                FROM upload_tasks
+                WHERE object_status='delete_unknown'
+                   OR (object_status='deleting' AND delete_started_at<?)
+                """,
+                (stale_delete_before,),
+            ).fetchone()
+        oldest = min(
+            (value for value in (uploads[1], deletions[1]) if value is not None),
+            default=None,
+        )
+        return {
+            "pending_uploads": uploads[0],
+            "pending_deletions": deletions[0],
+            "pending_tasks": uploads[0] + deletions[0],
+            "oldest_created_at": oldest,
+        }
 
     def write_log(self, record: dict[str, Any]) -> None:
         with self.transaction() as connection:

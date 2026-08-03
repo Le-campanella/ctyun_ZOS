@@ -42,6 +42,8 @@ class EventLogger:
             self._logger.setLevel(logging.INFO)
             self._logger.propagate = False
         self.degraded = False
+        self.last_failure_at: str | None = None
+        self.last_success_at: str | None = None
 
     def emit(
         self,
@@ -71,3 +73,7 @@ class EventLogger:
                 self.database.write_log(record)
             except Exception:
                 self.degraded = True
+                self.last_failure_at = utc_now()
+            else:
+                self.degraded = False
+                self.last_success_at = utc_now()

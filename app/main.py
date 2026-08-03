@@ -182,6 +182,20 @@ class RequestGuardMiddleware:
         scope.setdefault("state", {})["request_id"] = request_id
         scope["state"]["started_at"] = monotonic()
         settings = self.settings()
+        if not settings.dashboard_enabled and (
+            scope["path"] in {"/dashboard", "/dashboard/settings"}
+            or scope["path"].startswith("/static/")
+            or scope["path"].startswith("/v1/dashboard/")
+        ):
+            await self._response(
+                scope,
+                receive,
+                send,
+                404,
+                error_body("NOT_FOUND", "资源未启用", request_id),
+                request_id,
+            )
+            return
         if _admin_path(scope["path"].rstrip("/") or "/", scope["method"]):
             if not _valid_admin_key(_admin_key(headers), settings.admin_api_keys):
                 await self._response(

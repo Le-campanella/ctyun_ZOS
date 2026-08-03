@@ -322,6 +322,24 @@ def test_event_logger_redacts_secrets_and_persists_notify(database: Database, ca
     assert "visible-no" not in capsys.readouterr().out
 
 
+def test_event_logger_recovers_from_persistence_failure(database, monkeypatch):
+    logger = EventLogger(database)
+    original = database.write_log
+    monkeypatch.setattr(
+        database,
+        "write_log",
+        lambda _record: (_ for _ in ()).throw(sqlite3.OperationalError("full")),
+    )
+    logger.emit(NOTIFY, "failed", "failed")
+    assert logger.degraded is True
+    assert logger.last_failure_at is not None
+
+    monkeypatch.setattr(database, "write_log", original)
+    logger.emit(NOTIFY, "recovered", "recovered")
+    assert logger.degraded is False
+    assert logger.last_success_at is not None
+
+
 def test_summary_percentile_log_pagination_and_retention(database: Database):
     config = database.activate_storage(storage_record(b"ciphertext"), 0)
     now = datetime.now(UTC)

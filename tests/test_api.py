@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from io import BytesIO
 import re
 import sqlite3
+from dataclasses import replace
 from threading import Event
 from time import monotonic, sleep
 from typing import BinaryIO
@@ -39,6 +40,7 @@ class FakeProvider(StorageProvider):
     delete_requests: list[tuple[str, str | None]] = []
     etags: dict[str, str] = {}
     version_ids: dict[str, str | None] = {}
+    head_requests = 0
 
     def __init__(self, config, credentials, _settings):
         self.config, self.credentials = self.validate(config, credentials)
@@ -84,6 +86,7 @@ class FakeProvider(StorageProvider):
     def head_object(
         self, object_key: str, version_id: str | None = None
     ) -> ObjectMetadata | None:
+        self.__class__.head_requests += 1
         if delay := self.config.get("head_delay"):
             sleep(delay)
         if self.config.get("head_timeout"):
@@ -139,6 +142,7 @@ def registry():
     FakeProvider.delete_requests.clear()
     FakeProvider.etags.clear()
     FakeProvider.version_ids.clear()
+    FakeProvider.head_requests = 0
     registry = ProviderRegistry()
     registry.register(FakeProvider)
     return registry
@@ -1386,6 +1390,35 @@ def test_ready_rejects_stale_storage_probe(client):
     assert response.json()["checks"]["storage"]["error_code"] == "STORAGE_PROBE_STALE"
 
 
+def test_ready_reports_event_log_degradation(client):
+    activate(client)
+    runtime = client.app.state.runtime
+    runtime.log.degraded = True
+    runtime.log.last_failure_at = utc_now()
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["event_log"]["status"] == "degraded"
+
+
+def test_dashboard_disabled_hides_pages_assets_and_dashboard_api(
+    settings, database, registry
+):
+    app = create_app(
+        settings=replace(settings, dashboard_enabled=False),
+        registry=registry,
+        database=database,
+        background=False,
+    )
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        test_client.headers["Authorization"] = ADMIN_AUTH
+        assert test_client.get("/dashboard").status_code == 404
+        assert test_client.get("/static/dashboard.js").status_code == 404
+        assert test_client.get("/v1/dashboard/summary").status_code == 404
+        assert test_client.get("/v1/settings/storage").status_code == 200
+
+
 def test_recovery_resolves_existing_and_missing_objects(settings, database, registry):
     app = create_app(
         settings=settings, registry=registry, database=database, background=False
@@ -1520,10 +1553,6 @@ def test_local_failure_is_marked_absent_and_removed_by_retention(client):
     assert database.task_by_id(task_id) is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 3 must bound recovery work and leave a visible backlog",
-)
 def test_recovery_pass_is_bounded(settings, database, registry):
     app = create_app(
         settings=settings, registry=registry, database=database, background=False
@@ -1558,6 +1587,11 @@ def test_recovery_pass_is_bounded(settings, database, registry):
 
         assert monotonic() - started < 0.5
         assert database.pending_tasks()
+        ready = test_client.get("/readyz").json()["checks"]["recovery"]
+        assert FakeProvider.head_requests == 25
+        assert ready["pending_uploads"] == 100
+        assert ready["pending_tasks"] == 100
+        assert ready["oldest_age_seconds"] is not None
 
 
 def test_recovery_keeps_size_mismatch_unknown(settings, database, registry):

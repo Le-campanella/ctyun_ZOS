@@ -45,8 +45,13 @@ class Settings:
     upload_spool_threshold_bytes: int = 8_388_608
     temp_min_free_bytes: int = 1_073_741_824
     sqlite_busy_timeout_ms: int = 5_000
-    request_timeout_seconds: int = 600
     recovery_retry_seconds: int = 60
+    recovery_initial_budget_seconds: int = 5
+    recovery_batch_size: int = 25
+    recovery_max_concurrency: int = 4
+    recovery_connect_timeout_seconds: int = 3
+    recovery_read_timeout_seconds: int = 10
+    recovery_max_attempts: int = 1
     stale_upload_seconds: int = 900
     stale_delete_seconds: int = 900
     storage_probe_interval_seconds: int = 30
@@ -98,8 +103,21 @@ class Settings:
             ),
             temp_min_free_bytes=_integer("TEMP_MIN_FREE_BYTES", 1_073_741_824),
             sqlite_busy_timeout_ms=_integer("SQLITE_BUSY_TIMEOUT_MS", 5_000, 1),
-            request_timeout_seconds=_integer("REQUEST_TIMEOUT_SECONDS", 600, 1),
             recovery_retry_seconds=_integer("RECOVERY_RETRY_SECONDS", 60, 1),
+            recovery_initial_budget_seconds=_integer(
+                "RECOVERY_INITIAL_BUDGET_SECONDS", 5, 1
+            ),
+            recovery_batch_size=_integer("RECOVERY_BATCH_SIZE", 25, 1),
+            recovery_max_concurrency=_integer(
+                "RECOVERY_MAX_CONCURRENCY", 4, 1
+            ),
+            recovery_connect_timeout_seconds=_integer(
+                "RECOVERY_CONNECT_TIMEOUT_SECONDS", 3, 1
+            ),
+            recovery_read_timeout_seconds=_integer(
+                "RECOVERY_READ_TIMEOUT_SECONDS", 10, 1
+            ),
+            recovery_max_attempts=_integer("RECOVERY_MAX_ATTEMPTS", 1, 1),
             stale_upload_seconds=_integer("STALE_UPLOAD_SECONDS", 900, 1),
             stale_delete_seconds=_integer("STALE_DELETE_SECONDS", 900, 1),
             storage_probe_interval_seconds=_integer(

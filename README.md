@@ -47,6 +47,8 @@ docker compose ps
 
 服务未配置对象存储时仍可访问 Dashboard 和设置页；`/readyz` 返回 `STORAGE_NOT_CONFIGURED`，未指定预设的上传接口返回 `STORAGE_DEFAULT_NOT_CONFIGURED`。在设置页选择 Provider，填写 S3 API Endpoint、Bucket、公网访问根地址及 AK/SK，先测试连接，再保存激活。
 
+启动恢复默认只处理最多 25 项，并以 4 路并发和 5 秒初始预算执行；剩余 backlog 由后台轮次继续处理。`/readyz` 暴露待恢复上传/删除数量、最旧任务年龄、最近恢复成功时间和事件日志持久化状态。恢复使用独立的短 Provider timeout，`DASHBOARD_ENABLED=false` 时 Dashboard 页面、静态资源和 Dashboard API 返回 404。未生效的 `REQUEST_TIMEOUT_SECONDS` 已移除。
+
 ## 数据库升级
 
 服务启动时使用 `PRAGMA user_version` 检测数据库版本：
