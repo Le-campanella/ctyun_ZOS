@@ -1481,6 +1481,10 @@
       "TaskDetailResponse": {
         "additionalProperties": false,
         "properties": {
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
           "content_type": {
             "title": "Content Type",
             "type": "string"
@@ -1668,6 +1672,7 @@
         "required": [
           "id",
           "request_id",
+          "client_id",
           "storage_preset",
           "storage_provider",
           "storage_config_revision",
@@ -1696,6 +1701,10 @@
       "TaskItemResponse": {
         "additionalProperties": false,
         "properties": {
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
           "content_type": {
             "title": "Content Type",
             "type": "string"
@@ -1872,6 +1881,7 @@
         "required": [
           "id",
           "request_id",
+          "client_id",
           "storage_preset",
           "storage_provider",
           "storage_config_revision",
@@ -2049,6 +2059,16 @@
       "AdminKeyHeader": {
         "in": "header",
         "name": "X-Admin-Key",
+        "type": "apiKey"
+      },
+      "ClientIdHeader": {
+        "in": "header",
+        "name": "X-Client-ID",
+        "type": "apiKey"
+      },
+      "ClientKeyHeader": {
+        "in": "header",
+        "name": "X-Client-Key",
         "type": "apiKey"
       }
     }
@@ -2933,6 +2953,38 @@
               ],
               "title": "X-Storage-Preset"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Client-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Client-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Client-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Client-Key"
+            }
           }
         ],
         "responses": {
@@ -2957,12 +3009,61 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "ClientIdHeader": [],
+            "ClientKeyHeader": []
+          },
+          {
+            "AdminBasic": []
+          },
+          {
+            "AdminBearer": []
+          },
+          {
+            "AdminKeyHeader": []
+          }
+        ],
         "summary": "Upload"
       }
     },
     "/v1/uploads/validate": {
       "post": {
         "operationId": "validate_upload_v1_uploads_validate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Client-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Client-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Client-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Client-Key"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2973,8 +3074,33 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "ClientIdHeader": [],
+            "ClientKeyHeader": []
+          },
+          {
+            "AdminBasic": []
+          },
+          {
+            "AdminBearer": []
+          },
+          {
+            "AdminKeyHeader": []
+          }
+        ],
         "summary": "Validate Upload"
       }
     }

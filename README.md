@@ -5,13 +5,13 @@
 ## 当前发布基线
 
 - 当前 HTTP 路径命名空间为 `/v1`；首次上传成功返回任务、对象元数据和一次性 `delete_token`，幂等重放不会补发 token。
-- 当前仓库数据库：schema v4；上传调用 Provider 前先持久化已接收大小，成功返回前用 HeadObject 校验远端大小，并保存 ETag、可选 VersionId 和对象状态。
+- 当前仓库数据库：schema v5；任务保存 `client_id`，幂等键按调用方隔离。上传调用 Provider 前先持久化已接收大小，成功返回前用 HeadObject 校验远端大小，并保存 ETag、可选 VersionId 和对象状态。
 - 数据库与 Runtime 已支持独立的多预设配置 revision、默认切换和按 config ID 缓存 Provider；`/v1/settings/storage/presets` 已开放局域网管理 API。上传接口可通过 `X-Storage-Preset` 选择已启用预设，未传时使用默认项。
 - Dashboard 设置页已支持多服务预设的创建、测试、更新、启停和默认切换；每项预设独立绑定 Provider、Endpoint、Bucket 和凭证。监控页可选择预设执行真实上传测试，并只读展示对象与删除状态。
 - 内置 Provider 包括 `ctyun_zos` 和 `s3_compatible`。后者适用于支持 S3 API、HeadObject、DeleteObject 和 `public-read` ACL 的其他对象存储服务；不声称兼容所有厂商私有协议。
 - `DELETE /v1/upload-tasks/{task_id}/object` 已开放严格删除：只接受任务级 `X-Delete-Token`，使用任务原配置校验对象元数据、精确删除 VersionId 并再次确认对象不存在。
 - 后台探测、恢复和维护任务由 supervisor 自动重试；任一后台任务异常时 `/readyz` 降级并记录 CRITICAL 日志。
-- [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 仍是未发布目标契约；仓库实现已推进到 Dashboard v3，正式生产行为以部署版本为准。
+- [docs/API.md](docs/API.md) v3 与 [docs/PLAN.md](docs/PLAN.md) v6 已同步当前仓库；服务器尚未部署本提交时，以服务器自身的 OpenAPI 为准。
 - 当前服务生成的 `/openapi.json` 是已实现接口的机器可读契约。
 
 实施记录见 [WORKLOG.md](WORKLOG.md)，外部审查与实施建议见 [docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md](docs/CTYUN_ZOS_REVIEW_AND_V3_IMPLEMENTATION.md)。
@@ -41,7 +41,9 @@ docker compose ps
 - 存活检查：`http://<内网IP>:8000/healthz`
 - 就绪检查：`http://<内网IP>:8000/readyz`
 
-首次启动前必须在 `.env` 设置至少 32 字符的 `ADMIN_API_KEYS`。浏览器访问 Dashboard 时使用 HTTP Basic，用户名固定为 `admin`、密码为当前管理员 key；API 客户端可以使用 `Authorization: Bearer <key>` 或 `X-Admin-Key: <key>`。轮换时先用逗号同时配置新旧 key，调用方切换后再移除旧 key。普通上传、接收验证、健康检查和持有 token 的严格删除不要求管理员 key。
+首次启动前必须在 `.env` 设置至少 32 字符的 `ADMIN_API_KEYS`。浏览器访问 Dashboard 时使用 HTTP Basic，用户名固定为 `admin`、密码为当前管理员 key；API 客户端可以使用 `Authorization: Bearer <key>` 或 `X-Admin-Key: <key>`。轮换时先用逗号同时配置新旧 key，调用方切换后再移除旧 key。
+
+`CLIENT_API_KEYS` 可配置为 `service-a:<至少32字符密钥>,service-b:<至少32字符密钥>`。配置后，上传和接收验证必须携带 `X-Client-ID` 与 `X-Client-Key`；未配置时保持兼容模式，所有任务归入 `legacy`。来源 IP 默认每分钟 60 次上传尝试；每个调用方默认最多保有 10000 个可能存在的对象、总计 1 TiB。Dashboard 会显示最大调用方占用及 80% 容量告警。
 
 `STORAGE_ENDPOINT_ALLOWLIST` 使用逗号配置允许的主机、域名后缀或 CIDR；默认只允许 `.zos.ctyun.cn`。通用 S3 服务必须显式加入其域名或网段。loopback、link-local 和 metadata 地址始终拒绝，HTTP Endpoint 仅可在开发环境显式开启。
 
@@ -53,13 +55,12 @@ docker compose ps
 
 服务启动时使用 `PRAGMA user_version` 检测数据库版本：
 
-- 空数据库直接创建 schema v4。
-- schema v1 依次事务升级到 v2、v3、v4。
-- schema v2 依次事务升级到 v3、v4；schema v3 事务升级到 v4。
-- 升级前使用 SQLite Online Backup 在数据库旁创建 `zos-upload.db.pre-v4-<timestamp>`，包括 WAL 中已提交数据。
+- 空数据库直接创建 schema v5。
+- schema v1 至 v4 依次事务升级到 v5。
+- 升级前使用 SQLite Online Backup 在数据库旁创建 `zos-upload.db.pre-v5-<timestamp>`，包括 WAL 中已提交数据。
 - 升级后执行 `integrity_check`、外键、默认预设、active revision 和引用完整性检查；失败时停止启动。
 
-schema v4 保留原 task ID、storage config ID 和 revision。历史成功任务继续标记为 `legacy_unverified`；恢复确认远端对象存在但没有删除 token hash 时标记为 `present_unclaimed` 并在 Dashboard 告警。不要让旧镜像直接打开已经升级的数据库；需要回滚旧镜像时，必须同时恢复升级前备份。
+schema v5 保留原 task ID、storage config ID 和 revision，并把历史任务归入 `client_id=legacy`。历史成功任务继续标记为 `legacy_unverified`；恢复确认远端对象存在但没有删除 token hash 时标记为 `present_unclaimed` 并在 Dashboard 告警。不要让旧镜像直接打开已经升级的数据库；需要回滚旧镜像时，必须同时恢复升级前备份。
 
 ## 调用上传接口
 
@@ -67,6 +68,8 @@ schema v4 保留原 task ID、storage config ID 和 revision。历史成功任�
 
 ```bash
 curl -fsS -F 'file=@./example.pdf' \
+  -H 'X-Client-ID: service-a' \
+  -H 'X-Client-Key: <client-key>' \
   http://<内网IP>:8000/v1/uploads/validate
 ```
 
@@ -76,6 +79,8 @@ curl -fsS -F 'file=@./example.pdf' \
 
 ```bash
 curl -fsS \
+  -H 'X-Client-ID: service-a' \
+  -H 'X-Client-Key: <client-key>' \
   -H 'X-Request-ID: caller-service-001' \
   -H 'Idempotency-Key: business-job-001' \
   -H 'X-Storage-Preset: archive' \
@@ -125,7 +130,7 @@ docker build --target test -t zos-upload-service:test .
 docker run --rm zos-upload-service:test
 ```
 
-测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果、重启/陈旧任务恢复、永久审计和数据库失败，以及管理员认证、Endpoint allowlist、无凭证对象管理清理、多预设路由、SQLite v1/v2/v3→v4 迁移与回滚、凭证加密和 Dashboard 设置接口。
+测试覆盖严格删除、token 隔离、VersionId、元数据变化、并发删除、未知结果、重启恢复、永久审计和数据库失败，以及管理员/调用方认证、来源限流、配额、作用域幂等、多预设路由、SQLite v1/v2/v3/v4→v5 迁移与回滚、Provider 有界缓存和 Dashboard。
 
 ## 部署到局域网服务器
 

@@ -9,7 +9,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_PRESET_ID = "00000000-0000-0000-0000-000000000001"
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS storage_configs (
@@ -259,6 +259,24 @@ SCHEMA_V4 = (
     + SERVICE_LOG_SCHEMA
 )
 
+UPLOAD_TASK_SCHEMA_V5 = UPLOAD_TASK_SCHEMA_V4.replace(
+    "    request_id TEXT NOT NULL,\n    idempotency_key TEXT,",
+    "    request_id TEXT NOT NULL,\n    client_id TEXT NOT NULL,\n    idempotency_key TEXT,",
+).replace(
+    "ON upload_tasks(idempotency_key) WHERE idempotency_key IS NOT NULL;",
+    "ON upload_tasks(client_id, idempotency_key) WHERE idempotency_key IS NOT NULL;",
+) + """
+CREATE INDEX idx_upload_tasks_client_object_status
+ON upload_tasks(client_id, object_status, status);
+"""
+
+SCHEMA_V5 = (
+    PRESET_SCHEMA_V3
+    + STORAGE_CONFIG_SCHEMA_V3
+    + UPLOAD_TASK_SCHEMA_V5
+    + SERVICE_LOG_SCHEMA
+)
+
 
 def _execute_statements(connection: sqlite3.Connection, script: str) -> None:
     for statement in script.split(";"):
@@ -290,15 +308,15 @@ class Database:
         with closing(self.connect()) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
                 raise RuntimeError(f"unsupported database schema version: {version}")
             backup = (
                 self._backup_before_upgrade(connection)
-                if version in (1, 2, 3)
+                if version in (1, 2, 3, 4)
                 else None
             )
             if version == 0:
-                self._run_migration(connection, 4, self._create_schema_v4)
+                self._run_migration(connection, 5, self._create_schema_v5)
             elif version == 1:
                 self._run_migration(connection, 2, self._migrate_v1_to_v2)
                 self._run_migration(
@@ -307,6 +325,9 @@ class Database:
                 self._run_migration(
                     connection, 4, self._migrate_v3_to_v4, foreign_keys=False
                 )
+                self._run_migration(
+                    connection, 5, self._migrate_v4_to_v5, foreign_keys=False
+                )
             elif version == 2:
                 self._run_migration(
                     connection, 3, self._migrate_v2_to_v3, foreign_keys=False
@@ -314,11 +335,21 @@ class Database:
                 self._run_migration(
                     connection, 4, self._migrate_v3_to_v4, foreign_keys=False
                 )
+                self._run_migration(
+                    connection, 5, self._migrate_v4_to_v5, foreign_keys=False
+                )
             elif version == 3:
                 self._run_migration(
                     connection, 4, self._migrate_v3_to_v4, foreign_keys=False
                 )
-            self._verify_schema_v4(connection)
+                self._run_migration(
+                    connection, 5, self._migrate_v4_to_v5, foreign_keys=False
+                )
+            elif version == 4:
+                self._run_migration(
+                    connection, 5, self._migrate_v4_to_v5, foreign_keys=False
+                )
+            self._verify_schema_v5(connection)
             return backup
 
     def _run_migration(
@@ -345,6 +376,9 @@ class Database:
 
     def _create_schema_v4(self, connection: sqlite3.Connection) -> None:
         _execute_statements(connection, SCHEMA_V4)
+
+    def _create_schema_v5(self, connection: sqlite3.Connection) -> None:
+        _execute_statements(connection, SCHEMA_V5)
 
     def _migrate_v1_to_v2(self, connection: sqlite3.Connection) -> None:
         additions = (
@@ -504,16 +538,47 @@ class Database:
         )
         connection.execute("DROP TABLE upload_tasks_v3")
 
+    def _migrate_v4_to_v5(self, connection: sqlite3.Connection) -> None:
+        for index in (
+            "uq_upload_tasks_idempotency_key",
+            "idx_upload_tasks_created_at_id",
+            "idx_upload_tasks_status_created_at",
+            "idx_upload_tasks_request_id",
+            "idx_upload_tasks_storage_config_id",
+            "idx_upload_tasks_object_status",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index}")
+        connection.execute("ALTER TABLE upload_tasks RENAME TO upload_tasks_v4")
+        _execute_statements(connection, UPLOAD_TASK_SCHEMA_V5)
+        connection.execute(
+            """
+            INSERT INTO upload_tasks (
+                id, request_id, client_id, idempotency_key, storage_config_id,
+                filename, content_type, object_key, public_url, status,
+                size_bytes, etag, version_id, delete_token_hash, object_status,
+                delete_request_id, delete_error_code, delete_started_at,
+                deleted_at, error_code, created_at, finished_at, duration_ms
+            )
+            SELECT id, request_id, 'legacy', idempotency_key, storage_config_id,
+                   filename, content_type, object_key, public_url, status,
+                   size_bytes, etag, version_id, delete_token_hash, object_status,
+                   delete_request_id, delete_error_code, delete_started_at,
+                   deleted_at, error_code, created_at, finished_at, duration_ms
+            FROM upload_tasks_v4
+            """
+        )
+        connection.execute("DROP TABLE upload_tasks_v4")
+
     def _backup_before_upgrade(self, connection: sqlite3.Connection) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        backup_path = self.path.with_name(f"{self.path.name}.pre-v4-{timestamp}")
+        backup_path = self.path.with_name(f"{self.path.name}.pre-v5-{timestamp}")
         with closing(sqlite3.connect(backup_path)) as destination:
             connection.backup(destination)
         return backup_path
 
-    def _verify_schema_v4(self, connection: sqlite3.Connection) -> None:
+    def _verify_schema_v5(self, connection: sqlite3.Connection) -> None:
         if connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-            raise RuntimeError("database schema version is not v4")
+            raise RuntimeError("database schema version is not v5")
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("database integrity check failed")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -531,7 +596,7 @@ class Database:
             )
         }
         if not required <= tables:
-            raise RuntimeError("database schema v4 is incomplete")
+            raise RuntimeError("database schema v5 is incomplete")
         columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(upload_tasks)")
         }
@@ -541,13 +606,14 @@ class Database:
             "delete_token_hash",
             "object_status",
             "deleted_at",
+            "client_id",
         } <= columns:
-            raise RuntimeError("upload task schema v4 is incomplete")
+            raise RuntimeError("upload task schema v5 is incomplete")
         upload_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='upload_tasks'"
         ).fetchone()[0]
         if "present_unclaimed" not in upload_sql:
-            raise RuntimeError("upload task schema v4 lacks unclaimed state")
+            raise RuntimeError("upload task schema v5 lacks unclaimed state")
         config_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(storage_configs)")
@@ -878,7 +944,8 @@ class Database:
                 "updated_at": now,
             }
 
-    def create_task(self, record: dict[str, Any]) -> None:
+    @staticmethod
+    def _insert_task(connection: sqlite3.Connection, record: dict[str, Any]) -> None:
         status = record["status"]
         object_status = record.get(
             "object_status",
@@ -891,6 +958,7 @@ class Database:
         columns = (
             "id",
             "request_id",
+            "client_id",
             "idempotency_key",
             "storage_config_id",
             "filename",
@@ -905,15 +973,52 @@ class Database:
             "finished_at",
             "duration_ms",
         )
+        connection.execute(
+            f"INSERT INTO upload_tasks ({','.join(columns)}) "
+            f"VALUES ({','.join('?' for _ in columns)})",
+            tuple(
+                object_status
+                if column == "object_status"
+                else record.get(column, "legacy")
+                if column == "client_id"
+                else record.get(column)
+                for column in columns
+            ),
+        )
+
+    def create_task(self, record: dict[str, Any]) -> None:
         with self.transaction() as connection:
-            connection.execute(
-                f"INSERT INTO upload_tasks ({','.join(columns)}) "
-                f"VALUES ({','.join('?' for _ in columns)})",
-                tuple(
-                    object_status if column == "object_status" else record.get(column)
-                    for column in columns
-                ),
-            )
+            self._insert_task(connection, record)
+
+    def create_task_with_quota(
+        self,
+        record: dict[str, Any],
+        *,
+        max_objects: int,
+        max_bytes: int,
+    ) -> None:
+        with self.transaction() as connection:
+            usage = connection.execute(
+                """
+                SELECT COUNT(*) AS object_count,
+                       COALESCE(SUM(size_bytes), 0) AS size_bytes
+                FROM upload_tasks
+                WHERE client_id=? AND (
+                    status IN ('uploading', 'unknown')
+                    OR (status='succeeded' AND object_status!='deleted')
+                )
+                """,
+                (record.get("client_id", "legacy"),),
+            ).fetchone()
+            next_objects = usage["object_count"] + 1
+            next_bytes = usage["size_bytes"] + (record.get("size_bytes") or 0)
+            if (max_objects and next_objects > max_objects) or (
+                max_bytes and next_bytes > max_bytes
+            ):
+                raise QuotaExceeded(
+                    usage["object_count"], usage["size_bytes"]
+                )
+            self._insert_task(connection, record)
 
     def update_task(self, task_id: str, **changes: Any) -> None:
         allowed = {
@@ -989,7 +1094,9 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def task_by_idempotency(self, key: str) -> dict[str, Any] | None:
+    def task_by_idempotency(
+        self, client_id: str, key: str
+    ) -> dict[str, Any] | None:
         with closing(self.connect()) as connection:
             row = connection.execute(
                 """
@@ -997,11 +1104,25 @@ class Database:
                 FROM upload_tasks t
                 JOIN storage_configs s ON s.id=t.storage_config_id
                 JOIN storage_presets p ON p.id=s.preset_id
-                WHERE t.idempotency_key=?
+                WHERE t.client_id=? AND t.idempotency_key=?
                 """,
-                (key,),
+                (client_id, key),
             ).fetchone()
         return dict(row) if row else None
+
+    def quota_usage(self) -> list[dict[str, Any]]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT client_id, COUNT(*) AS object_count,
+                       COALESCE(SUM(size_bytes), 0) AS size_bytes
+                FROM upload_tasks
+                WHERE status IN ('uploading', 'unknown')
+                   OR (status='succeeded' AND object_status!='deleted')
+                GROUP BY client_id ORDER BY client_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_tasks(
         self,
@@ -1296,3 +1417,9 @@ class DefaultPresetConflict(Exception):
     ):
         self.current_default_preset = current_default_preset
         self.current_state_revision = current_state_revision
+
+
+class QuotaExceeded(Exception):
+    def __init__(self, object_count: int, size_bytes: int):
+        self.object_count = object_count
+        self.size_bytes = size_bytes

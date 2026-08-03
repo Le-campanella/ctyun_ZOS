@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -64,8 +65,10 @@ class Runtime:
         self.log = EventLogger(self.database)
         self._active_lock = threading.RLock()
         self._snapshots_by_key: dict[str, StorageSnapshot] = {}
-        self._providers_by_config_id: dict[str, StorageProvider] = {}
-        self._recovery_providers_by_config_id: dict[str, StorageProvider] = {}
+        self._providers_by_config_id: OrderedDict[str, StorageProvider] = OrderedDict()
+        self._recovery_providers_by_config_id: OrderedDict[
+            str, StorageProvider
+        ] = OrderedDict()
         self._default_preset_key: str | None = None
         self.schema_ready = False
         self.recovery_complete = False
@@ -179,7 +182,7 @@ class Runtime:
     ) -> StorageSnapshot:
         snapshot = self._snapshot(record, provider)
         with self._active_lock:
-            self._providers_by_config_id[record["id"]] = provider
+            self._cache_provider(self._providers_by_config_id, record["id"], provider)
             self._snapshots_by_key = self._snapshots_by_key | {
                 snapshot.preset_key: snapshot
             }
@@ -187,9 +190,22 @@ class Runtime:
                 self._default_preset_key = snapshot.preset_key
         return snapshot
 
+    def _cache_provider(
+        self,
+        cache: OrderedDict[str, StorageProvider],
+        config_id: str,
+        provider: StorageProvider,
+    ) -> None:
+        cache[config_id] = provider
+        cache.move_to_end(config_id)
+        while len(cache) > self.settings.provider_cache_max_entries:
+            cache.popitem(last=False)
+
     def provider_for_record(self, record: dict[str, Any]) -> StorageProvider:
         with self._active_lock:
             cached = self._providers_by_config_id.get(record["id"])
+            if cached is not None:
+                self._providers_by_config_id.move_to_end(record["id"])
         if cached is not None:
             return cached
         provider_type = self.registry.get(
@@ -203,12 +219,14 @@ class Runtime:
             self.settings,
         )
         with self._active_lock:
-            self._providers_by_config_id[record["id"]] = provider
+            self._cache_provider(self._providers_by_config_id, record["id"], provider)
         return provider
 
     def provider_for_config(self, config_id: str) -> StorageProvider:
         with self._active_lock:
             cached = self._providers_by_config_id.get(config_id)
+            if cached is not None:
+                self._providers_by_config_id.move_to_end(config_id)
         if cached is not None:
             return cached
         record = self.database.storage_by_id(config_id)
@@ -221,6 +239,8 @@ class Runtime:
     def recovery_provider_for_config(self, config_id: str) -> StorageProvider:
         with self._active_lock:
             cached = self._recovery_providers_by_config_id.get(config_id)
+            if cached is not None:
+                self._recovery_providers_by_config_id.move_to_end(config_id)
         if cached is not None:
             return cached
         record = self.database.storage_by_id(config_id)
@@ -244,8 +264,18 @@ class Runtime:
             self.settings,
         )
         with self._active_lock:
-            self._recovery_providers_by_config_id[config_id] = provider
+            self._cache_provider(
+                self._recovery_providers_by_config_id, config_id, provider
+            )
         return provider
+
+    def provider_cache_status(self) -> dict[str, int]:
+        with self._active_lock:
+            return {
+                "regular_entries": len(self._providers_by_config_id),
+                "recovery_entries": len(self._recovery_providers_by_config_id),
+                "max_entries": self.settings.provider_cache_max_entries,
+            }
 
     def active_snapshot(self, preset_key: str | None = None) -> StorageSnapshot | None:
         with self._active_lock:

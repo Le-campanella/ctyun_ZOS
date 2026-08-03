@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 import re
 import sqlite3
 from dataclasses import replace
@@ -41,6 +42,7 @@ class FakeProvider(StorageProvider):
     etags: dict[str, str] = {}
     version_ids: dict[str, str | None] = {}
     head_requests = 0
+    last_upload_file = None
 
     def __init__(self, config, credentials, _settings):
         self.config, self.credentials = self.validate(config, credentials)
@@ -74,6 +76,7 @@ class FakeProvider(StorageProvider):
     def upload_file(
         self, fileobj: BinaryIO, object_key: str, content_type: str
     ) -> None:
+        self.__class__.last_upload_file = fileobj
         if self.config.get("block_upload"):
             self.__class__.upload_started.set()
             self.__class__.upload_release.wait(3)
@@ -143,6 +146,7 @@ def registry():
     FakeProvider.etags.clear()
     FakeProvider.version_ids.clear()
     FakeProvider.head_requests = 0
+    FakeProvider.last_upload_file = None
     registry = ProviderRegistry()
     registry.register(FakeProvider)
     return registry
@@ -232,6 +236,90 @@ def test_admin_routes_require_key_while_upload_data_plane_stays_open(client):
         client.headers["Authorization"] = authorization
 
 
+def test_client_auth_scopes_idempotency_and_enforces_quota(
+    settings, database, registry
+):
+    client_key_a = "a" * 32
+    client_key_b = "b" * 32
+    limited = replace(
+        settings,
+        client_api_keys=(("service-a", client_key_a), ("service-b", client_key_b)),
+        client_max_objects=1,
+        client_max_bytes=100,
+        upload_rate_limit_per_minute=10,
+    )
+    app = create_app(
+        settings=limited, registry=registry, database=database, background=False
+    )
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        activate(test_client)
+        missing = test_client.post(
+            "/v1/uploads/validate", files={"file": ("a.bin", b"a")}
+        )
+        assert missing.status_code == 401
+        assert missing.json()["error"]["code"] == "CLIENT_AUTH_REQUIRED"
+
+        def headers(client_id, key):
+            return {
+                "X-Client-ID": client_id,
+                "X-Client-Key": key,
+                "Idempotency-Key": "shared-job",
+            }
+
+        first_a = test_client.post(
+            "/v1/uploads",
+            headers=headers("service-a", client_key_a),
+            files={"file": ("a.bin", b"first")},
+        )
+        first_b = test_client.post(
+            "/v1/uploads",
+            headers=headers("service-b", client_key_b),
+            files={"file": ("b.bin", b"second")},
+        )
+        quota = test_client.post(
+            "/v1/uploads",
+            headers={
+                "X-Client-ID": "service-a",
+                "X-Client-Key": client_key_a,
+                "Idempotency-Key": "another-job",
+            },
+            files={"file": ("c.bin", b"third")},
+        )
+
+        assert first_a.status_code == first_b.status_code == 201
+        assert first_a.json()["task_id"] != first_b.json()["task_id"]
+        assert quota.status_code == 429
+        assert quota.json()["error"]["code"] == "CLIENT_QUOTA_EXCEEDED"
+        assert quota.headers["Retry-After"] == "3600"
+        detail = test_client.get(
+            f"/v1/upload-tasks/{first_a.json()['task_id']}",
+            headers={"Authorization": ADMIN_AUTH},
+        ).json()
+        assert detail["client_id"] == "service-a"
+        summary = test_client.get(
+            "/v1/dashboard/summary", headers={"Authorization": ADMIN_AUTH}
+        ).json()
+        assert summary["uploads"]["quota"]["warning"] is True
+
+
+def test_source_ip_rate_limit_returns_retry_after(settings, database, registry):
+    limited = replace(settings, upload_rate_limit_per_minute=2)
+    app = create_app(
+        settings=limited, registry=registry, database=database, background=False
+    )
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        for _ in range(2):
+            assert test_client.post(
+                "/v1/uploads/validate", files={"file": ("a.bin", b"a")}
+            ).status_code == 200
+        blocked = test_client.post(
+            "/v1/uploads/validate", files={"file": ("a.bin", b"a")}
+        )
+        assert blocked.status_code == 429
+        assert blocked.json()["error"]["code"] == "UPLOAD_RATE_LIMITED"
+        assert int(blocked.headers["Retry-After"]) >= 1
+
+
 def test_storage_endpoint_allowlist_rejects_loopback_and_unlisted_private(client):
     for endpoint in ("https://127.0.0.1", "https://10.0.0.1"):
         response = client.put(
@@ -255,9 +343,14 @@ def test_openapi_and_first_upload_response_contract(client, database):
         "AdminBearer",
         "AdminBasic",
         "AdminKeyHeader",
+        "ClientIdHeader",
+        "ClientKeyHeader",
     }
     assert "security" in contract["paths"]["/v1/settings/storage"]["get"]
-    assert "security" not in contract["paths"]["/v1/uploads"]["post"]
+    assert {
+        "ClientIdHeader": [],
+        "ClientKeyHeader": [],
+    } in contract["paths"]["/v1/uploads"]["post"]["security"]
     assert "UploadResponse" in schemas
     upload_schema = schemas["UploadResponse"]
     assert set(upload_schema["required"]) == {
@@ -1299,6 +1392,49 @@ def test_capacity_rejects_second_upload_but_queries_stay_available(client):
     assert second.json()["error"]["code"] == "UPLOAD_CAPACITY_EXCEEDED"
     assert second.headers["Retry-After"] == "5"
     assert health.status_code == 200
+
+
+def test_database_write_wait_does_not_block_task_queries(client, database, monkeypatch):
+    activate(client)
+    started = Event()
+    release = Event()
+    original = database.create_task_with_quota
+
+    def blocked(*args, **kwargs):
+        started.set()
+        release.wait(3)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(database, "create_task_with_quota", blocked)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        uploading = pool.submit(
+            client.post, "/v1/uploads", files={"file": ("a.bin", b"payload")}
+        )
+        assert started.wait(2)
+        before = monotonic()
+        listing = client.get("/v1/upload-tasks")
+        elapsed = monotonic() - before
+        release.set()
+        assert uploading.result(timeout=3).status_code == 201
+
+    assert listing.status_code == 200
+    assert elapsed < 1
+
+
+def test_upload_path_reuses_framework_spool_without_second_copy():
+    source = (Path(__file__).resolve().parents[1] / "app/main.py").read_text()
+
+    assert "SpooledTemporaryFile" not in source
+    assert "_copy_upload" not in source
+    assert "provider.upload_file, source.file" in source
+
+
+def test_upload_form_closes_framework_file(client):
+    activate(client)
+    assert client.post(
+        "/v1/uploads", files={"file": ("a.bin", b"payload")}
+    ).status_code == 201
+    assert FakeProvider.last_upload_file.closed is True
 
 
 def test_filename_content_type_and_multipart_edges(client):

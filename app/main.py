@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import math
 import re
 import secrets
 import sqlite3
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
-from tempfile import SpooledTemporaryFile
 from time import monotonic
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -30,6 +32,7 @@ from .database import (
     DefaultPresetConflict,
     PresetNotFound,
     PresetStateConflict,
+    QuotaExceeded,
     RevisionConflict,
     utc_now,
 )
@@ -116,6 +119,24 @@ def _valid_admin_key(supplied: str | None, expected: tuple[str, ...]) -> bool:
     return matched
 
 
+def _client_identity(headers: dict[bytes, bytes], settings: Settings) -> str | None:
+    if _valid_admin_key(_admin_key(headers), settings.admin_api_keys):
+        return "admin-dashboard"
+    if not settings.client_api_keys:
+        return "legacy"
+    client_id = headers.get(b"x-client-id", b"").decode("latin1")
+    supplied = headers.get(b"x-client-key", b"").decode("latin1")
+    matched = False
+    for expected_id, expected_key in settings.client_api_keys:
+        matched |= secrets.compare_digest(
+            client_id, expected_id
+        ) & secrets.compare_digest(
+            supplied,
+            expected_key,
+        )
+    return client_id if matched else None
+
+
 class APIError(Exception):
     def __init__(
         self,
@@ -137,11 +158,6 @@ class BodyTooLarge(Exception):
     pass
 
 
-class FileTooLarge(Exception):
-    def __init__(self, observed: int):
-        self.observed = observed
-
-
 def error_body(
     code: str, message: str, request_id: str, task_id: str | None = None
 ) -> dict[str, Any]:
@@ -158,6 +174,9 @@ class RequestGuardMiddleware:
         self.app = app
         self.settings = settings
         self.active_uploads = 0
+        # ponytail: direct LAN peers keep this map small; add a global sweep if
+        # the service ever accepts high-cardinality public source addresses.
+        self._upload_attempts: dict[str, deque[float]] = {}
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -217,6 +236,41 @@ class RequestGuardMiddleware:
         )
         acquired = False
         if is_upload:
+            client_id = _client_identity(headers, settings)
+            if client_id is None:
+                await self._response(
+                    scope,
+                    receive,
+                    send,
+                    401,
+                    error_body(
+                        "CLIENT_AUTH_REQUIRED", "需要有效的调用方凭证", request_id
+                    ),
+                    request_id,
+                )
+                return
+            scope["state"]["client_id"] = client_id
+            source = scope.get("client")
+            source_ip = source[0] if source else "unknown"
+            now = monotonic()
+            attempts = self._upload_attempts.setdefault(source_ip, deque())
+            while attempts and attempts[0] <= now - 60:
+                attempts.popleft()
+            if len(attempts) >= settings.upload_rate_limit_per_minute:
+                retry_after = max(1, math.ceil(60 - (now - attempts[0])))
+                await self._response(
+                    scope,
+                    receive,
+                    send,
+                    429,
+                    error_body(
+                        "UPLOAD_RATE_LIMITED", "来源地址上传频率过高", request_id
+                    ),
+                    request_id,
+                    {"Retry-After": str(retry_after)},
+                )
+                return
+            attempts.append(now)
             if self.active_uploads >= settings.max_concurrent_uploads:
                 await self._response(
                     scope,
@@ -327,19 +381,7 @@ def _content_type(value: str | None) -> str:
     return value
 
 
-def _copy_upload(source, destination, chunk_size: int, maximum: int) -> int:
-    source.seek(0)
-    size = 0
-    while chunk := source.read(chunk_size):
-        size += len(chunk)
-        if size > maximum:
-            raise FileTooLarge(size)
-        destination.write(chunk)
-    destination.seek(0)
-    return size
-
-
-async def _upload_file(request: Request, runtime: Runtime) -> UploadFile:
+async def _upload_file(request: Request, runtime: Runtime):
     if not request.headers.get("content-type", "").startswith(
         "multipart/form-data"
     ):
@@ -354,12 +396,36 @@ async def _upload_file(request: Request, runtime: Runtime) -> UploadFile:
         raise
     except Exception as exc:
         raise APIError(400, "BAD_REQUEST", "multipart 请求格式错误") from exc
-    files = form.getlist("file")
-    if not files:
-        raise APIError(400, "FILE_REQUIRED", "缺少 file 字段")
-    if len(files) != 1 or not isinstance(files[0], UploadFile):
-        raise APIError(400, "BAD_REQUEST", "每次请求只能上传一个文件")
-    return files[0]
+    try:
+        files = form.getlist("file")
+        if not files:
+            raise APIError(400, "FILE_REQUIRED", "缺少 file 字段")
+        if len(files) != 1 or not isinstance(files[0], UploadFile):
+            raise APIError(400, "BAD_REQUEST", "每次请求只能上传一个文件")
+        return form, files[0]
+    except Exception:
+        await form.close()
+        raise
+
+
+async def _source_size(source: UploadFile) -> int:
+    if source.size is None:
+
+        def measure() -> int:
+            source.file.seek(0, 2)
+            size = source.file.tell()
+            source.file.seek(0)
+            return size
+
+        size = await anyio.to_thread.run_sync(measure)
+    else:
+        size = source.size
+        await source.seek(0)
+    return size
+
+
+async def _database_call(method, *args, **kwargs):
+    return await anyio.to_thread.run_sync(partial(method, *args, **kwargs))
 
 
 def _parse_time(value: str | None, name: str) -> datetime | None:
@@ -401,6 +467,7 @@ def _task_item(task: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     item = {
         "id": task["id"],
         "request_id": task["request_id"],
+        "client_id": task.get("client_id", "legacy"),
         "storage_preset": task["storage_preset"],
         "storage_provider": task.get("storage_provider"),
         "storage_config_revision": task.get("storage_config_revision"),
@@ -533,7 +600,7 @@ def _deletion_gate(task: dict[str, Any]) -> JSONResponse | None:
     return None
 
 
-def _save_deletion(
+async def _save_deletion(
     runtime: Runtime,
     request_id: str,
     task: dict[str, Any],
@@ -541,7 +608,7 @@ def _save_deletion(
     **changes: Any,
 ) -> None:
     try:
-        runtime.database.update_task(task["id"], **changes)
+        await _database_call(runtime.database.update_task, task["id"], **changes)
     except sqlite3.Error as exc:
         runtime.log.emit(
             50,
@@ -588,13 +655,13 @@ def _save_deletion(
     )
 
 
-def _delete_pending(
+async def _delete_pending(
     runtime: Runtime,
     request: Request,
     task: dict[str, Any],
     provider_result: str = "uncertain",
 ) -> JSONResponse:
-    _save_deletion(
+    await _save_deletion(
         runtime,
         _request_id(request),
         task,
@@ -953,29 +1020,22 @@ def create_app(
         return _no_store(result)
 
     @app.post("/v1/uploads/validate", response_model=ReceiveValidationResponse)
-    async def validate_upload(request: Request):
+    async def validate_upload(
+        request: Request,
+        x_client_id: str | None = Header(default=None, alias="X-Client-ID"),
+        x_client_key: str | None = Header(default=None, alias="X-Client-Key"),
+    ):
         runtime: Runtime = request.app.state.runtime
-        source = await _upload_file(request, runtime)
-        filename = _filename(source.filename)
-        content_type = _content_type(source.content_type)
-        spool = SpooledTemporaryFile(
-            max_size=runtime.settings.upload_spool_threshold_bytes,
-            mode="w+b",
-            dir=runtime.settings.temp_dir,
-        )
+        del x_client_id, x_client_key
+        form, source = await _upload_file(request, runtime)
         try:
-            try:
-                size = await anyio.to_thread.run_sync(
-                    _copy_upload,
-                    source.file,
-                    spool,
-                    runtime.settings.upload_read_chunk_bytes,
-                    runtime.settings.max_upload_bytes,
-                )
-            except FileTooLarge as exc:
+            filename = _filename(source.filename)
+            content_type = _content_type(source.content_type)
+            size = await _source_size(source)
+            if size > runtime.settings.max_upload_bytes:
                 raise APIError(
                     413, "FILE_TOO_LARGE", "文件不能超过 200 MiB"
-                ) from exc
+                )
             if size == 0:
                 raise APIError(400, "FILE_EMPTY", "文件不能为空")
             return {
@@ -988,8 +1048,7 @@ def create_app(
                 "request_id": _request_id(request),
             }
         finally:
-            spool.close()
-            await source.close()
+            await form.close()
 
     @app.post("/v1/uploads", response_model=UploadResponse)
     async def upload(
@@ -997,15 +1056,21 @@ def create_app(
         x_storage_preset: str | None = Header(
             default=None, alias="X-Storage-Preset"
         ),
+        x_client_id: str | None = Header(default=None, alias="X-Client-ID"),
+        x_client_key: str | None = Header(default=None, alias="X-Client-Key"),
     ):
         runtime: Runtime = request.app.state.runtime
+        del x_client_id, x_client_key
+        client_id = request.state.client_id
         idempotency = request.headers.get("idempotency-key")
         if idempotency is not None:
             if not 1 <= len(idempotency) <= 128 or any(
                 ord(char) < 33 or ord(char) > 126 for char in idempotency
             ):
                 raise APIError(400, "BAD_REQUEST", "Idempotency-Key 不合法")
-            existing = runtime.database.task_by_idempotency(idempotency)
+            existing = await _database_call(
+                runtime.database.task_by_idempotency, client_id, idempotency
+            )
             if existing:
                 return _existing_upload(existing, x_storage_preset)
         if x_storage_preset is not None:
@@ -1017,9 +1082,14 @@ def create_app(
                 _provider_status(exc), exc.code, exc.message
             ) from exc
         provider = snapshot.provider
-        source = await _upload_file(request, runtime)
-        filename = _filename(source.filename)
-        content_type = _content_type(source.content_type)
+        form, source = await _upload_file(request, runtime)
+        try:
+            filename = _filename(source.filename)
+            content_type = _content_type(source.content_type)
+            size = await _source_size(source)
+        except Exception:
+            await form.close()
+            raise
         task_id = str(uuid4())
         date = datetime.now(ZoneInfo(runtime.settings.app_timezone)).strftime(
             "%Y/%m/%d"
@@ -1030,6 +1100,7 @@ def create_app(
         task = {
             "id": task_id,
             "request_id": _request_id(request),
+            "client_id": client_id,
             "idempotency_key": idempotency,
             "storage_config_id": snapshot.storage_config_id,
             "filename": filename,
@@ -1037,18 +1108,43 @@ def create_app(
             "object_key": object_key,
             "public_url": public_url,
             "status": "uploading",
-            "size_bytes": None,
+            "size_bytes": size,
             "error_code": None,
             "created_at": utc_now(),
             "finished_at": None,
             "duration_ms": None,
         }
         try:
-            runtime.database.create_task(task)
-        except sqlite3.IntegrityError:
-            existing = runtime.database.task_by_idempotency(idempotency)
+            if size == 0 or size > runtime.settings.max_upload_bytes:
+                await _database_call(runtime.database.create_task, task)
+            else:
+                await _database_call(
+                    runtime.database.create_task_with_quota,
+                    task,
+                    max_objects=runtime.settings.client_max_objects,
+                    max_bytes=runtime.settings.client_max_bytes,
+                )
+        except QuotaExceeded as exc:
+            existing = await _database_call(
+                runtime.database.task_by_idempotency, client_id, idempotency
+            )
+            await form.close()
             if existing:
                 return _existing_upload(existing, snapshot.preset_key)
+            raise APIError(
+                429,
+                "CLIENT_QUOTA_EXCEEDED",
+                "调用方对象数量或字节配额已满",
+                headers={"Retry-After": "3600"},
+            ) from exc
+        except sqlite3.IntegrityError:
+            existing = await _database_call(
+                runtime.database.task_by_idempotency, client_id, idempotency
+            )
+            if existing:
+                await form.close()
+                return _existing_upload(existing, snapshot.preset_key)
+            await form.close()
             raise APIError(
                 409,
                 "UPLOAD_IN_PROGRESS",
@@ -1056,6 +1152,7 @@ def create_app(
                 task_id=existing["id"] if existing else None,
             )
         except sqlite3.Error as exc:
+            await form.close()
             raise APIError(500, "DATABASE_ERROR", "无法创建上传任务") from exc
         runtime.log.emit(
             NOTIFY,
@@ -1069,25 +1166,13 @@ def create_app(
                 "storage_preset": snapshot.preset_key,
             },
         )
-        spool = SpooledTemporaryFile(
-            max_size=runtime.settings.upload_spool_threshold_bytes,
-            mode="w+b",
-            dir=runtime.settings.temp_dir,
-        )
         try:
-            try:
-                size = await anyio.to_thread.run_sync(
-                    _copy_upload,
-                    source.file,
-                    spool,
-                    runtime.settings.upload_read_chunk_bytes,
-                    runtime.settings.max_upload_bytes,
-                )
-            except FileTooLarge as exc:
-                runtime.database.update_task(
+            if size > runtime.settings.max_upload_bytes:
+                await _database_call(
+                    runtime.database.update_task,
                     task_id,
                     status="failed",
-                    size_bytes=None,
+                    size_bytes=size,
                     object_status="absent",
                     error_code="FILE_TOO_LARGE",
                     finished_at=utc_now(),
@@ -1098,9 +1183,10 @@ def create_app(
                     "FILE_TOO_LARGE",
                     "文件不能超过 200 MiB",
                     task_id=task_id,
-                ) from exc
+                )
             if size == 0:
-                runtime.database.update_task(
+                await _database_call(
+                    runtime.database.update_task,
                     task_id,
                     status="failed",
                     size_bytes=0,
@@ -1111,21 +1197,13 @@ def create_app(
                 )
                 raise APIError(400, "FILE_EMPTY", "文件不能为空", task_id=task_id)
             try:
-                runtime.database.update_task(task_id, size_bytes=size)
-            except sqlite3.Error as exc:
-                raise APIError(
-                    500,
-                    "DATABASE_ERROR",
-                    "无法在上传前保存文件大小",
-                    task_id=task_id,
-                ) from exc
-            try:
                 await anyio.to_thread.run_sync(
-                    provider.upload_file, spool, object_key, content_type
+                    provider.upload_file, source.file, object_key, content_type
                 )
             except ProviderError as exc:
                 status = "unknown" if exc.uncertain else "failed"
-                runtime.database.update_task(
+                await _database_call(
+                    runtime.database.update_task,
                     task_id,
                     status=status,
                     size_bytes=size,
@@ -1149,7 +1227,8 @@ def create_app(
                     )
                 require_upload_metadata(metadata, size)
             except ProviderError as exc:
-                runtime.database.update_task(
+                await _database_call(
+                    runtime.database.update_task,
                     task_id,
                     status="unknown",
                     size_bytes=size,
@@ -1161,7 +1240,8 @@ def create_app(
             duration = _duration(request)
             delete_token, delete_token_hash = issue_delete_token()
             try:
-                runtime.database.update_task(
+                await _database_call(
+                    runtime.database.update_task,
                     task_id,
                     status="succeeded",
                     size_bytes=metadata.size_bytes,
@@ -1217,8 +1297,7 @@ def create_app(
                 headers={"Cache-Control": "no-store"},
             )
         finally:
-            spool.close()
-            await source.close()
+            await form.close()
 
     @app.get("/v1/upload-tasks", response_model=TaskListResponse)
     async def tasks(request: Request):
@@ -1237,7 +1316,8 @@ def create_app(
         if from_time and to_time and to_time <= from_time:
             raise APIError(400, "BAD_REQUEST", "to 必须晚于 from")
         try:
-            items = request.app.state.runtime.database.list_tasks(
+            items = await _database_call(
+                request.app.state.runtime.database.list_tasks,
                 limit=limit,
                 offset=offset,
                 status=status,
@@ -1258,7 +1338,9 @@ def create_app(
             UUID(task_id)
         except ValueError as exc:
             raise APIError(400, "BAD_REQUEST", "任务 ID 不合法") from exc
-        task = request.app.state.runtime.database.task_by_id(task_id)
+        task = await _database_call(
+            request.app.state.runtime.database.task_by_id, task_id
+        )
         if task is None:
             raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
         return _task_item(task, detail=True)
@@ -1287,7 +1369,7 @@ def create_app(
         ) not in {None, "0"}:
             raise APIError(400, "BAD_REQUEST", "删除请求不能包含请求体")
         runtime: Runtime = request.app.state.runtime
-        task = runtime.database.task_by_id(task_id)
+        task = await _database_call(runtime.database.task_by_id, task_id)
         if task is None:
             raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
         admin_cleanup = request.url.path.startswith("/v1/admin/")
@@ -1323,7 +1405,9 @@ def create_app(
                 if admin_cleanup
                 else runtime.database.claim_task_deletion
             )
-            claimed = claim(task_id, _request_id(request), utc_now())
+            claimed = await _database_call(
+                claim, task_id, _request_id(request), utc_now()
+            )
         except sqlite3.Error as exc:
             raise APIError(
                 500,
@@ -1332,7 +1416,7 @@ def create_app(
                 task_id=task_id,
             ) from exc
         if not claimed:
-            current = runtime.database.task_by_id(task_id)
+            current = await _database_call(runtime.database.task_by_id, task_id)
             if current is None:
                 raise APIError(404, "TASK_NOT_FOUND", "任务不存在")
             if admin_cleanup:
@@ -1371,7 +1455,7 @@ def create_app(
         try:
             provider = runtime.provider_for_config(task["storage_config_id"])
         except Exception as exc:
-            _save_deletion(
+            await _save_deletion(
                 runtime,
                 _request_id(request),
                 task,
@@ -1391,8 +1475,8 @@ def create_app(
             )
         except ProviderError as exc:
             if exc.uncertain:
-                return _delete_pending(runtime, request, task, exc.code)
-            _save_deletion(
+                return await _delete_pending(runtime, request, task, exc.code)
+            await _save_deletion(
                 runtime,
                 _request_id(request),
                 task,
@@ -1408,7 +1492,7 @@ def create_app(
             ) from exc
         if metadata is None:
             deleted_at = utc_now()
-            _save_deletion(
+            await _save_deletion(
                 runtime,
                 _request_id(request),
                 task,
@@ -1428,7 +1512,7 @@ def create_app(
             task["etag"],
             task["version_id"],
         ):
-            _save_deletion(
+            await _save_deletion(
                 runtime,
                 _request_id(request),
                 task,
@@ -1448,8 +1532,8 @@ def create_app(
             )
         except ProviderError as exc:
             if exc.uncertain:
-                return _delete_pending(runtime, request, task, exc.code)
-            _save_deletion(
+                return await _delete_pending(runtime, request, task, exc.code)
+            await _save_deletion(
                 runtime,
                 _request_id(request),
                 task,
@@ -1468,7 +1552,7 @@ def create_app(
                 provider.head_object, task["object_key"], task["version_id"]
             )
         except ProviderError:
-            return _delete_pending(runtime, request, task, "post_delete_head_error")
+            return await _delete_pending(runtime, request, task, "post_delete_head_error")
         if remaining is not None:
             if not matches_object_metadata(
                 remaining,
@@ -1476,10 +1560,10 @@ def create_app(
                 task["etag"],
                 task["version_id"],
             ):
-                return _delete_pending(
+                return await _delete_pending(
                     runtime, request, task, "post_delete_object_changed"
                 )
-            _save_deletion(
+            await _save_deletion(
                 runtime,
                 _request_id(request),
                 task,
@@ -1494,7 +1578,7 @@ def create_app(
                 task_id=task_id,
             )
         deleted_at = utc_now()
-        _save_deletion(
+        await _save_deletion(
             runtime,
             _request_id(request),
             task,
@@ -1513,7 +1597,25 @@ def create_app(
     async def dashboard_summary(request: Request):
         from_time, to_time = _time_range(request)
         runtime: Runtime = request.app.state.runtime
-        uploads = runtime.database.summary(from_time, to_time)
+        uploads = await _database_call(runtime.database.summary, from_time, to_time)
+        usage = await _database_call(runtime.database.quota_usage)
+        uploads["quota"] = {
+            "max_objects": runtime.settings.client_max_objects,
+            "max_bytes": runtime.settings.client_max_bytes,
+            "clients": usage,
+            "warning": any(
+                (
+                    runtime.settings.client_max_objects
+                    and item["object_count"]
+                    >= runtime.settings.client_max_objects * 0.8
+                )
+                or (
+                    runtime.settings.client_max_bytes
+                    and item["size_bytes"] >= runtime.settings.client_max_bytes * 0.8
+                )
+                for item in usage
+            ),
+        }
         ready_state, checks, _ = runtime.ready_checks()
         return {
             "range": {"from": from_time, "to": to_time},
@@ -1533,7 +1635,9 @@ def create_app(
         if interval not in {"hour", "day"}:
             raise APIError(400, "BAD_REQUEST", "interval 必须为 hour 或 day")
         runtime: Runtime = request.app.state.runtime
-        tasks = runtime.database.tasks_in_range(from_time, to_time)
+        tasks = await _database_call(
+            runtime.database.tasks_in_range, from_time, to_time
+        )
         timezone = ZoneInfo(runtime.settings.app_timezone)
         start_utc = _parse_time(from_time, "from")
         end_utc = _parse_time(to_time, "to")
@@ -1626,7 +1730,8 @@ def create_app(
             key: request.query_params.get(key)
             for key in ("event", "request_id", "task_id", "error_code")
         }
-        items = request.app.state.runtime.database.list_logs(
+        items = await _database_call(
+            request.app.state.runtime.database.list_logs,
             min_level=LEVELS[level_name],
             limit=limit,
             before_id=before_id,
@@ -1688,6 +1793,16 @@ def create_app(
                 "in": "header",
                 "name": "X-Admin-Key",
             },
+            ClientIdHeader={
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Client-ID",
+            },
+            ClientKeyHeader={
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Client-Key",
+            },
         )
         for path, methods in schema["paths"].items():
             for method, operation in methods.items():
@@ -1697,6 +1812,16 @@ def create_app(
                     operation["security"] = [
                         {"AdminBearer": []},
                         {"AdminBasic": []},
+                        {"AdminKeyHeader": []},
+                    ]
+                elif method.upper() == "POST" and path in {
+                    "/v1/uploads",
+                    "/v1/uploads/validate",
+                }:
+                    operation["security"] = [
+                        {"ClientIdHeader": [], "ClientKeyHeader": []},
+                        {"AdminBasic": []},
+                        {"AdminBearer": []},
                         {"AdminKeyHeader": []},
                     ]
         app.openapi_schema = schema

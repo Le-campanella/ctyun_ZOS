@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v3，上传对象元数据确认、一次性删除凭证、多预设 Runtime、管理 API、显式上传路由、严格 DELETE、删除恢复、永久审计和 Dashboard v3 已经实现。
+第一版 MVP 已完成本地构建与自动验收。当前 HTTP 路径仍为 `/v1`；仓库数据库已升级为 schema v5，上传对象元数据确认、一次性删除凭证、多预设 Runtime、管理 API、调用方身份与配额、严格 DELETE、删除恢复、永久审计和 Dashboard 已经实现。
 
 ## 已完成
 
@@ -178,3 +178,19 @@
 
 - 移除上传二次 spool 并统一请求资源清理；隔离阻塞数据库工作并限制 Provider cache。
 - 在明确兼容策略后引入调用方身份、作用域幂等键、限流与配额。
+
+### 已完成：Phase 5 容量、性能与调用方边界
+
+- 移除应用层第二份 `SpooledTemporaryFile`；multipart 解析后的 `UploadFile` 直接交给 Provider，所有成功、校验失败和异常路径统一关闭 `FormData`。
+- 上传、任务查询、Dashboard 统计和删除请求路径中的阻塞 SQLite 操作移入线程执行，上传事务不再阻塞 ASGI 事件循环；维护事务期间任务查询响应测试通过。
+- 普通与恢复 Provider cache 改为各自有界的 LRU，默认每类最多保留 128 个配置实例；在途快照持有 Provider 引用，不受淘汰影响。
+- 新增可选 `CLIENT_API_KEYS`。未配置时兼容归入 `legacy`；配置后上传和接收验证要求 `X-Client-ID` 与 `X-Client-Key`，Dashboard 管理员真实上传归入 `admin-dashboard`。
+- SQLite 升级到 schema v5，历史任务标记为 `client_id=legacy`，幂等唯一约束改为 `(client_id, idempotency_key)`；迁移前保留 `pre-v5` Online Backup。
+- 来源 IP 滑动窗口限流默认每分钟 60 次；每调用方对象数与字节配额在同一 SQLite 写事务内检查并创建任务，稳定返回 `429` 与 `Retry-After`。
+- Dashboard 展示活跃调用方容量、最大对象/字节占用，并在任一调用方达到 80% 时告警。
+- 新增资源关闭、无二次 spool、数据库可响应、缓存上限、调用方认证、跨调用方幂等、限流、配额及 v4→v5 迁移/回滚测试；完整容器测试 `100 passed`。
+- 本阶段没有写入真实业务 Bucket；现有 `scripts/accept-zos.sh` 可在发布验收窗口执行 4 路近 200 MiB 实测，避免开发阶段制造大对象。
+
+### 下一步：Phase 6
+
+- 固化依赖和镜像、扩展 CI 质量门禁、校验 OpenAPI 快照，并整理长期维护文档结构。

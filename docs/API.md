@@ -1,20 +1,20 @@
 ---
-status: unreleased
+status: current
 target_version: v3
 implementation_baseline: API v1
-database_schema: v4
-implementation_status: admin_control_plane_ready
+database_schema: v5
+implementation_status: caller_boundaries_ready
 ---
 
 # 局域网轻量文件上传服务接口文档（ZOS v3）
 
 > 面向对象：局域网内调用本服务的其他服务、接入 Agent，以及包含监控与存储设置功能的 Dashboard。
 >
-> 接口文档修订：`v3`（多存储预设、上传路由、严格删除、删除恢复与审计、Dashboard v3 已实现）；HTTP 路径命名空间继续使用 `/v1`。
+> 接口文档修订：`v3`（多存储预设、严格删除、调用方身份、配额与 Dashboard 已实现）；HTTP 路径命名空间继续使用 `/v1`。
 >
 > 同步基线：`PLAN.md` v6
 >
-> **注意：本文是尚未发布的 v3 目标契约，不能作为当前生产接口契约。当前已实现行为以 README 的“当前发布基线”和服务 OpenAPI 为准。**
+> **注意：本文与当前仓库实现同步；服务器尚未部署本提交时，以服务器自身的 `/openapi.json` 为准。**
 
 ## 1. 能力范围
 
@@ -38,7 +38,7 @@ implementation_status: admin_control_plane_ready
 - 示例地址：`http://zos-upload-service:8000`
 - 服务仅部署在受控局域网地址或内部容器网络。
 - API 与 Dashboard 共用同一个局域网端口。
-- 普通上传、接收验证、健康检查和持有 token 的严格删除维持局域网数据面调用方式。
+- 普通上传和接收验证使用可选调用方凭证；未配置 `CLIENT_API_KEYS` 时兼容归入 `legacy` 调用方。健康检查和持有 token 的严格删除不要求调用方凭证。
 - Dashboard、静态资源、设置、日志、OpenAPI、任务列表与完整详情要求管理员凭证。
 - 删除是破坏性操作，除受控局域网边界外还必须提供上传成功响应中的任务级 `delete_token`。
 - 防火墙、VLAN、容器网络和端口暴露规则构成访问边界。
@@ -47,6 +47,8 @@ implementation_status: admin_control_plane_ready
 - Dashboard 监控 API 使用 `GET`；存储设置使用 `GET`、`POST`、`PUT` 和 `PATCH`。
 - 管理请求接受 `Authorization: Bearer <key>`、`X-Admin-Key: <key>` 或浏览器原生 HTTP Basic（用户名 `admin`）。
 - `ADMIN_API_KEYS` 支持逗号分隔的新旧 key 并行轮换；每个 key 至少 32 字符，错误凭证返回 `401 ADMIN_AUTH_REQUIRED`。
+- `CLIENT_API_KEYS` 配置后，上传与接收验证必须同时提交 `X-Client-ID` 和 `X-Client-Key`；错误凭证返回 `401 CLIENT_AUTH_REQUIRED`。
+- 上传频率按 ASGI 连接的直接来源 IP 统计，不信任 `X-Forwarded-For`；超过限制返回 `429 UPLOAD_RATE_LIMITED` 和 `Retry-After`。
 - 设置写请求只接受 JSON，并要求自定义 Header `X-Settings-Request: true`，用于降低浏览器跨站误提交风险。
 - 设置请求会传输 AK/SK。正式部署仍应通过内网 HTTPS 或隔离管理网络保护传输链路。
 - Storage Endpoint 必须匹配 `STORAGE_ENDPOINT_ALLOWLIST`；解析后的 loopback、link-local、metadata 和未授权私网地址会被拒绝，HTTP 默认禁用。
@@ -92,7 +94,35 @@ X-Request-ID: optional-request-id
 - 服务在所有 API 响应头中返回最终使用的 `X-Request-ID`。
 - `X-Request-ID` 用于追踪当前 HTTP 请求，不承担幂等作用。
 
-### 3.3 通用错误结构
+### 3.3 调用方身份
+
+部署端可以配置：
+
+```text
+CLIENT_API_KEYS=service-a:<至少32字符密钥>,service-b:<至少32字符密钥>
+```
+
+配置后，`POST /v1/uploads` 和 `POST /v1/uploads/validate` 必须提交：
+
+```http
+X-Client-ID: service-a
+X-Client-Key: opaque-client-secret
+```
+
+`client_id` 用于隔离幂等键和统计配额，不用于选择存储预设。未配置 `CLIENT_API_KEYS` 时服务保持兼容模式，所有新任务归入 `legacy`。管理员凭证也可用于 Dashboard 的真实上传测试，此类任务归入 `admin-dashboard`。调用方密钥不得写入 URL 或日志。
+
+相关部署配置：
+
+```text
+UPLOAD_RATE_LIMIT_PER_MINUTE=60
+CLIENT_MAX_OBJECTS=10000
+CLIENT_MAX_BYTES=1099511627776
+PROVIDER_CACHE_MAX_ENTRIES=128
+```
+
+来源限流以 ASGI 直接连接 IP 为准，服务不读取 `X-Forwarded-For`。调用方配额统计正在上传、结果未知以及成功但尚未确认删除的任务；`absent` 或 `deleted` 对象不占配额。对象数和字节数使用同一组全局上限，但按 `client_id` 分别核算。Dashboard 在任一占用达到 80% 时显示告警。
+
+### 3.4 通用错误结构
 
 ```json
 {
@@ -113,7 +143,7 @@ X-Request-ID: optional-request-id
 - FastAPI 默认的参数校验错误统一映射为 `400 BAD_REQUEST`，接口不直接返回框架默认的 `422` 结构。
 - 运维接口可以在通用错误对象之外附带只读诊断字段，例如 `/readyz` 的 `checks`。
 
-### 3.4 设置请求与敏感字段
+### 3.5 设置请求与敏感字段
 
 设置测试和保存请求必须满足：
 
@@ -147,6 +177,8 @@ Content-Type: multipart/form-data; boundary=...
 X-Request-ID: optional-request-id
 Idempotency-Key: optional-idempotency-key
 X-Storage-Preset: optional-preset-key
+X-Client-ID: service-a
+X-Client-Key: opaque-client-secret
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -156,6 +188,7 @@ X-Storage-Preset: optional-preset-key
 请求规则：
 
 - 每次请求只能包含一个 `file` 字段。
+- 配置了 `CLIENT_API_KEYS` 时必须提交有效的调用方身份；未配置时任务归入 `legacy`。
 - 文件上限为 `209715200` 字节。
 - 请求体上限默认为 `213909504` 字节，用于容纳文件和 multipart 边界。
 - 接受所有文件类型。
@@ -290,12 +323,15 @@ Idempotency-Replayed: true
 | 400 | `FILE_EMPTY` | 文件内容为空 | `failed` |
 | 400 | `BAD_REQUEST` | multipart、Header 或参数格式错误 | 视失败阶段而定 |
 | 400 | `STORAGE_PRESET_INVALID` | `X-Storage-Preset` 格式错误 | 无 |
+| 401 | `CLIENT_AUTH_REQUIRED` | 调用方身份缺失或错误 | 无 |
 | 404 | `STORAGE_PRESET_NOT_FOUND` | 显式指定的预设不存在 | 无 |
 | 409 | `STORAGE_PRESET_DISABLED` | 显式指定的预设已禁用 | 无 |
 | 409 | `IDEMPOTENCY_SCOPE_MISMATCH` | 幂等键原任务绑定了不同预设 | 复用已有任务 ID |
 | 409 | `UPLOAD_IN_PROGRESS` | 相同幂等键对应任务为 `uploading` 或 `unknown` | 复用已有任务 ID |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | 相同幂等键对应任务为 `failed` | 复用已有任务 ID |
 | 413 | `FILE_TOO_LARGE` | 文件或请求体超过上限 | 视失败阶段而定 |
+| 429 | `UPLOAD_RATE_LIMITED` | 直接来源 IP 在一分钟内提交过多上传请求 | 无新任务 |
+| 429 | `CLIENT_QUOTA_EXCEEDED` | 调用方对象数或字节配额已满 | 无新任务 |
 | 500 | `DATABASE_ERROR` | 创建或更新任务记录失败 | 不保证 |
 | 500 | `INTERNAL_ERROR` | 未分类内部异常 | 视失败阶段而定 |
 | 502 | `UPLOAD_FAILED` | Storage Provider 明确拒绝或上传失败 | `failed` |
@@ -307,13 +343,13 @@ Idempotency-Replayed: true
 | 503 | `STORAGE_NOT_CONFIGURED` | 显式预设没有 active 配置 | 无新任务 |
 | 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 未指定预设且默认预设不可用 | 无新任务 |
 
-容量已满时响应包含：
+限流、配额或并发容量已满时响应包含：
 
 ```http
 Retry-After: 5
 ```
 
-`Retry-After` 是服务建议的等待秒数，调用方应按该值延迟重试。
+`Retry-After` 是服务建议的等待秒数：并发容量默认返回 `5`，调用方配额当前返回 `3600`，来源限流返回当前窗口剩余秒数。调用方应按实际响应值延迟重试。
 
 幂等任务处理中示例：
 
@@ -341,9 +377,11 @@ POST /v1/uploads/validate HTTP/1.1
 Host: zos-upload-service:8000
 Content-Type: multipart/form-data; boundary=...
 X-Request-ID: optional-request-id
+X-Client-ID: service-a
+X-Client-Key: opaque-client-secret
 ```
 
-请求使用与正式上传相同的单个 `file` 字段、200 MiB 文件上限、请求体上限和并发容量。未配置 Storage Provider 时也可以调用。
+请求使用与正式上传相同的调用方认证、来源 IP 限流、单个 `file` 字段、200 MiB 文件上限、请求体上限和并发容量。未配置 Storage Provider 时也可以调用；验证请求不创建任务，因此不消耗对象或字节配额。
 
 成功响应：
 
@@ -394,6 +432,7 @@ Host: zos-upload-service:8000
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "request_id": "example-001",
+      "client_id": "service-a",
       "storage_preset": "zos-main",
       "storage_provider": "ctyun_zos",
       "storage_config_revision": 3,
@@ -418,6 +457,7 @@ Host: zos-upload-service:8000
     {
       "id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
       "request_id": "example-002",
+      "client_id": "service-b",
       "storage_preset": "zos-main",
       "storage_provider": "ctyun_zos",
       "storage_config_revision": 3,
@@ -451,6 +491,7 @@ Host: zos-upload-service:8000
 |---|---|---|
 | `id` | string | 任务 UUID |
 | `request_id` | string | 首次创建任务的请求追踪 ID |
+| `client_id` | string | 创建任务的调用方身份；v5 之前历史任务为 `legacy` |
 | `storage_preset` | string | 创建任务时解析并绑定的预设 key |
 | `storage_provider` | string | 创建任务时使用的 Provider |
 | `storage_config_revision` | integer | 创建任务时绑定的配置 revision |
@@ -489,6 +530,7 @@ Host: zos-upload-service:8000
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "request_id": "example-001",
+  "client_id": "service-a",
   "idempotency_key": "ingest-job-20260729-001",
   "storage_preset": "zos-main",
   "storage_provider": "ctyun_zos",
@@ -517,7 +559,7 @@ Host: zos-upload-service:8000
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `idempotency_key` | string 或 null | 首次请求携带的幂等键 |
+| `idempotency_key` | string 或 null | 首次请求携带的幂等键；与 `client_id` 共同唯一 |
 
 错误：
 
@@ -1883,7 +1925,7 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - Header 可选。
 - 长度范围为 1 至 128 个可见 ASCII 字符。
 - 值区分大小写。
-- 唯一性范围为当前服务实例使用的任务数据库。
+- 唯一性范围为当前服务实例任务数据库中的 `(client_id, idempotency_key)`；不同调用方可安全复用相同键。
 - 幂等保证持续到对应任务记录被保留策略删除，默认最长保留 180 天。
 - 幂等键绑定第一次请求意图，服务不读取完整文件来比较重复请求内容。
 - 幂等键绑定第一次新任务解析得到的 `storage_preset`。
@@ -1912,6 +1954,7 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - 收到 `409 IDEMPOTENCY_KEY_REUSED`：确认业务意图后使用新幂等键。
 - 收到 `409 IDEMPOTENCY_SCOPE_MISMATCH`：使用原预设重放，或为新的目标预设使用新幂等键。
 - 收到 `503 UPLOAD_CAPACITY_EXCEEDED`：遵循 `Retry-After`。
+- 收到 `429 UPLOAD_RATE_LIMITED` 或 `429 CLIENT_QUOTA_EXCEEDED`：遵循 `Retry-After`，不要立即重试。
 - 客户端等待响应时发生网络超时：使用相同幂等键重新请求，或先查询已知 `task_id`。
 - 未使用幂等键的自动重试会产生重复对象风险。
 - 首次 `201` 响应丢失时，幂等重放可以恢复 URL 和对象元数据，但不能恢复删除凭证；恢复任务进入 `present_unclaimed`，只能由管理员清理。
@@ -1930,6 +1973,7 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 400 | `STORAGE_CREDENTIALS_REQUIRED` | 首次配置或 Provider/schema version/Endpoint 变化时缺少完整 AK/SK |
 | 400 | `STORAGE_ENDPOINT_FORBIDDEN` | Endpoint 未进入 allowlist、协议不安全或解析到被禁止地址 |
 | 401 | `ADMIN_AUTH_REQUIRED` | 管理员凭证缺失或错误 |
+| 401 | `CLIENT_AUTH_REQUIRED` | 上传调用方凭证缺失或错误 |
 | 403 | `DELETE_TOKEN_INVALID` | 删除凭证缺失、错误或与任务不匹配 |
 | 404 | `TASK_NOT_FOUND` | 指定任务不存在 |
 | 404 | `STORAGE_PRESET_NOT_FOUND` | 指定存储预设不存在 |
@@ -1945,6 +1989,8 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 409 | `OBJECT_CHANGED` | 删除前对象元数据与上传记录不一致 |
 | 409 | `DELETE_IN_PROGRESS` | 对象正在删除或等待确认 |
 | 413 | `FILE_TOO_LARGE` | 文件或请求体超过上限 |
+| 429 | `UPLOAD_RATE_LIMITED` | 直接来源 IP 上传频率超过限制 |
+| 429 | `CLIENT_QUOTA_EXCEEDED` | 调用方对象数或字节配额已满 |
 | 500 | `DATABASE_ERROR` | SQLite 创建、读取或更新失败 |
 | 500 | `SETTINGS_STORAGE_ERROR` | 设置加密、持久化或 Client 切换失败 |
 | 500 | `INTERNAL_ERROR` | 未分类服务异常 |
@@ -2075,6 +2121,7 @@ curl --fail-with-body \
 ## 19. 调用方注意事项
 
 - 上传请求使用 `multipart/form-data`，字段名固定为 `file`。
+- 配置了 `CLIENT_API_KEYS` 时同时提交 `X-Client-ID` 与 `X-Client-Key`；密钥不得进入 URL 或业务日志。
 - 需要特定 Endpoint 与 Bucket 时提交服务端预先分配的 `X-Storage-Preset`；不要在请求中传原始存储参数。
 - 未传 `X-Storage-Preset` 时使用当前默认项；显式预设失败不会自动回退。
 - 文件内容直接放入 multipart，避免 Base64 编码和 JSON 包装。
@@ -2093,6 +2140,6 @@ curl --fail-with-body \
 - 设置客户端更新配置前读取当前 `revision`，并把它作为 `expected_revision` 提交。
 - Provider、`provider_schema_version` 或 Endpoint 变化时重新提交完整 AK/SK；三者均不变时才允许省略凭证对象或字段。
 - 设置请求优先通过局域网 HTTPS 发送，反向代理和调用方禁止记录请求体。
-- 局域网内任何可访问服务端口的客户端都能修改设置，网络边界需要覆盖 Dashboard 与设置 API。
+- Dashboard 与设置 API 必须提交管理员凭证；网络边界仍应覆盖服务端口。
 - Dashboard 本地统计表示本服务处理的上传；Provider 原生指标表示整个 Bucket 的活动。
 - 对象仍可能存在的任务不会按年龄清理；只有对象状态为 `absent` 或 `deleted` 的终态任务才适用默认 180 天保留期。普通日志默认保留 30 天或最多 100000 条，`object_delete_*` 删除审计永久保留。

@@ -18,6 +18,7 @@ from app.database import (
     Database,
     DefaultPresetConflict,
     PresetStateConflict,
+    QuotaExceeded,
     RevisionConflict,
     SCHEMA_VERSION,
     utc_now,
@@ -47,6 +48,21 @@ def test_default_database_path_matches_compose_volume(monkeypatch):
     monkeypatch.setenv("ADMIN_API_KEYS", "test-admin-key-000000000000000000")
 
     assert Settings.from_env().database_path.as_posix() == "/data/db/zos-upload.db"
+
+
+def test_client_key_configuration_rejects_weak_or_duplicate_entries(monkeypatch):
+    monkeypatch.setenv("SETTINGS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("ADMIN_API_KEYS", "test-admin-key-000000000000000000")
+    monkeypatch.setenv("CLIENT_API_KEYS", "service-a:short")
+    with pytest.raises(ValueError, match="CLIENT_API_KEYS"):
+        Settings.from_env()
+
+    key = "x" * 32
+    monkeypatch.setenv(
+        "CLIENT_API_KEYS", f"service-a:{key},service-a:{key}"
+    )
+    with pytest.raises(ValueError, match="unique"):
+        Settings.from_env()
 
 
 def storage_record(ciphertext: bytes, *, item_id: str | None = None) -> dict:
@@ -260,6 +276,43 @@ def test_idempotency_index_is_unique(database: Database):
     with pytest.raises(sqlite3.IntegrityError):
         database.create_task(second)
 
+    second["client_id"] = "service-b"
+    database.create_task(second)
+    assert database.task_by_idempotency("service-b", "same")["id"] == second["id"]
+
+
+def test_provider_cache_is_bounded(settings, database):
+    limited = replace(settings, provider_cache_max_entries=2)
+    runtime = Runtime(limited, ProviderRegistry(), database)
+
+    for index in range(4):
+        runtime._cache_provider(runtime._providers_by_config_id, str(index), object())
+
+    assert list(runtime._providers_by_config_id) == ["2", "3"]
+    assert runtime.provider_cache_status() == {
+        "regular_entries": 2,
+        "recovery_entries": 0,
+        "max_entries": 2,
+    }
+
+
+def test_client_quota_checks_objects_and_bytes_atomically(database: Database):
+    config = database.activate_storage(storage_record(b"ciphertext"), 0)
+    first = task_record(config["id"], created_at=utc_now()) | {
+        "client_id": "service-a",
+        "size_bytes": 6,
+    }
+    with pytest.raises(QuotaExceeded):
+        database.create_task_with_quota(first, max_objects=10, max_bytes=5)
+
+    database.create_task_with_quota(first, max_objects=1, max_bytes=10)
+    second = task_record(config["id"], created_at=utc_now()) | {
+        "client_id": "service-a",
+        "size_bytes": 1,
+    }
+    with pytest.raises(QuotaExceeded):
+        database.create_task_with_quota(second, max_objects=1, max_bytes=10)
+
 
 def test_retention_never_removes_a_task_that_may_still_have_an_object(
     database: Database,
@@ -303,6 +356,7 @@ def test_event_logger_redacts_secrets_and_persists_notify(database: Database, ca
         "persisted",
         details={
             "secret_key": "visible-no",
+            "client_key": "visible-no",
             "delete_token": "visible-no",
             "token_hash": "visible-no",
             "x_admin_key": "visible-no",
@@ -314,6 +368,7 @@ def test_event_logger_redacts_secrets_and_persists_notify(database: Database, ca
     assert len(rows) == 1
     assert rows[0]["details"] == {
         "secret_key": "[REDACTED]",
+        "client_key": "[REDACTED]",
         "delete_token": "[REDACTED]",
         "token_hash": "[REDACTED]",
         "x_admin_key": "[REDACTED]",

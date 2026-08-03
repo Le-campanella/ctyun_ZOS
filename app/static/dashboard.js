@@ -82,6 +82,21 @@
     setText("metric-bytes", formatBytes(uploads.successful_upload_bytes));
     setText("metric-average", formatDuration(uploads.average_duration_ms));
     setText("metric-p95", `P95 ${formatDuration(uploads.p95_duration_ms)}`);
+    const quota = uploads.quota;
+    const quotaStatus = $("quota-status");
+    if (quota && quota.clients.length) {
+      const utilization = (item) => Math.max(
+        quota.max_objects ? item.object_count / quota.max_objects : 0,
+        quota.max_bytes ? item.size_bytes / quota.max_bytes : 0,
+      );
+      const largest = quota.clients.reduce((current, item) => (
+        utilization(item) > utilization(current) ? item : current
+      ));
+      quotaStatus.textContent = `调用方容量：${quota.clients.length} 个活跃；最大占用 ${largest.client_id} · ${largest.object_count}/${quota.max_objects || "∞"} 个对象 · ${formatBytes(largest.size_bytes)}/${quota.max_bytes ? formatBytes(quota.max_bytes) : "∞"}`;
+      quotaStatus.className = `notice ${quota.warning ? "warning" : "ok"}`;
+    } else {
+      quotaStatus.className = "notice hidden";
+    }
     setText("updated-at", `更新于 ${formatTime(data.generated_at)}`);
   }
 

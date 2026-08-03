@@ -4,7 +4,7 @@
 >
 > 完整调用方与 Dashboard 接口契约见 [API.md](API.md)。本文与 `API.md` 已完成同步。
 >
-> 实现进度（2026-08-03）：SQLite schema v4 状态完整性、管理员控制面认证、有界恢复、事务化部署回滚、独立灾备工具，以及既有多预设、严格删除与 Dashboard 已完成。
+> 实现进度（2026-08-03）：SQLite schema v5、管理员控制面认证、有界恢复、事务化部署回滚、独立灾备、调用方身份/配额，以及既有多预设、严格删除与 Dashboard 已完成。
 
 ## 1. 目标
 
@@ -150,20 +150,15 @@ YYYY/MM/DD/{task_id}.{safe_extension}
 
 ### 6.1 临时文件策略
 
-上传采用两阶段处理：
-
-1. 将请求文件按固定块大小写入 `SpooledTemporaryFile`，同时累计字节数并校验上限。
-2. 校验通过后将临时文件指针复位，再交给 S3 Transfer Manager 上传。
+上传只使用 Starlette multipart 解析器创建的单个 `UploadFile` spool。解析完成后读取框架维护的文件大小，复位同一文件指针并直接交给 S3 Transfer Manager，不再复制到第二个临时文件。
 
 默认参数：
 
 ```text
-UPLOAD_READ_CHUNK_BYTES=1048576
-UPLOAD_SPOOL_THRESHOLD_BYTES=8388608
 MAX_UPLOAD_BYTES=209715200
 ```
 
-前 8 MiB 可以保存在内存，超过阈值后自动写入 `TEMP_DIR`。上传结束后通过 `finally` 统一清理。
+spool 是否落盘由 Starlette multipart 实现决定；上传结束、校验失败和异常路径均关闭整个 `FormData`，由框架统一回收所有上传 part。
 
 ### 6.2 请求体限制
 
@@ -178,6 +173,8 @@ MAX_UPLOAD_BYTES=209715200
 - `MAX_CONCURRENT_UPLOADS` 默认值为 `4`。
 - 信号量在 multipart 解析前获取，限制接收、临时写入和 ZOS 上传的完整链路。
 - 容量已满时返回 `503 UPLOAD_CAPACITY_EXCEEDED`，并带 `Retry-After` 响应头。
+- 直接来源 IP 默认每分钟最多发起 `60` 次上传或接收验证，超过时返回 `429 UPLOAD_RATE_LIMITED`；不信任未经配置的代理转发头。
+- 每个调用方默认最多保有 `10000` 个可能存在的对象、总计 `1 TiB`；检查和任务插入在同一 SQLite 写事务中完成，超过时返回 `429 CLIENT_QUOTA_EXCEEDED`。
 - Dashboard、任务查询和健康检查不占用上传信号量。
 - `TEMP_DIR` 可用空间至少满足：
 
@@ -273,6 +270,7 @@ Provider ID 不使用数据库枚举约束，新增 adapter 和 preset 即可引
 CREATE TABLE upload_tasks (
     id                 TEXT PRIMARY KEY,
     request_id         TEXT NOT NULL,
+    client_id          TEXT NOT NULL,
     idempotency_key    TEXT,
     storage_config_id  TEXT NOT NULL REFERENCES storage_configs(id),
     filename           TEXT NOT NULL,
@@ -303,7 +301,7 @@ CREATE TABLE upload_tasks (
 );
 
 CREATE UNIQUE INDEX uq_upload_tasks_idempotency_key
-ON upload_tasks(idempotency_key)
+ON upload_tasks(client_id, idempotency_key)
 WHERE idempotency_key IS NOT NULL;
 
 CREATE INDEX idx_upload_tasks_created_at_id
@@ -328,7 +326,8 @@ ON upload_tasks(object_status, created_at DESC);
 |---|---|
 | `id` | 任务 UUID，同时用于生成对象 Key |
 | `request_id` | 请求追踪 ID |
-| `idempotency_key` | 调用方可选幂等键 |
+| `client_id` | 认证调用方 ID；兼容模式和 v5 前历史任务为 `legacy` |
+| `idempotency_key` | 调用方可选幂等键；在同一 `client_id` 内唯一 |
 | `storage_config_id` | 创建任务时使用的存储配置 revision |
 | `filename` | 经过长度限制的原始文件名 |
 | `content_type` | 上传到对象存储的 Content-Type |
@@ -998,6 +997,10 @@ MAX_CONCURRENT_UPLOADS × S3_TRANSFER_MAX_CONCURRENCY + 4
 ```text
 # 凭证加密
 SETTINGS_ENCRYPTION_KEY
+ADMIN_API_KEYS
+
+# 上传调用方；留空时兼容归入 legacy
+CLIENT_API_KEYS=
 
 # 首次启动导入
 BOOTSTRAP_STORAGE_FROM_ENV=true
@@ -1006,8 +1009,9 @@ BOOTSTRAP_STORAGE_FROM_ENV=true
 MAX_UPLOAD_BYTES=209715200
 MAX_REQUEST_BODY_BYTES=213909504
 MAX_CONCURRENT_UPLOADS=4
-UPLOAD_READ_CHUNK_BYTES=1048576
-UPLOAD_SPOOL_THRESHOLD_BYTES=8388608
+UPLOAD_RATE_LIMIT_PER_MINUTE=60
+CLIENT_MAX_OBJECTS=10000
+CLIENT_MAX_BYTES=1099511627776
 S3_MULTIPART_THRESHOLD_BYTES=16777216
 S3_MULTIPART_CHUNK_BYTES=16777216
 S3_TRANSFER_MAX_CONCURRENCY=2
@@ -1033,6 +1037,7 @@ RECOVERY_CONNECT_TIMEOUT_SECONDS=3
 RECOVERY_READ_TIMEOUT_SECONDS=10
 RECOVERY_MAX_ATTEMPTS=1
 STALE_UPLOAD_SECONDS=900
+PROVIDER_CACHE_MAX_ENTRIES=128
 DASHBOARD_ENABLED=true
 ```
 
@@ -1200,7 +1205,7 @@ enable_bucket_metrics
 
 ### 19.4 Dashboard 验收
 
-- 局域网浏览器无需登录即可打开 `/dashboard`。
+- 局域网浏览器使用管理员 HTTP Basic 凭证打开 `/dashboard`；匿名访问返回 `401`。
 - 24 小时、7 天和 30 天上传流量与 SQLite 任务数据一致。
 - 成功率、状态数量、平均耗时和 P95 正确。
 - 近期任务可以查看对象 Key、URL 和错误码。

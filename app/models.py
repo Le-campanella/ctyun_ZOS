@@ -187,6 +187,7 @@ class ReceiveValidationResponse(ContractModel):
 class TaskItemResponse(ContractModel):
     id: str
     request_id: str
+    client_id: str
     storage_preset: str
     storage_provider: str | None
     storage_config_revision: int | None
