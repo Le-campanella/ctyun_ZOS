@@ -62,7 +62,7 @@ class Settings:
     app_timezone: str = "Asia/Shanghai"
     max_upload_bytes: int = 209_715_200
     max_request_body_bytes: int = 213_909_504
-    max_concurrent_uploads: int = 4
+    max_concurrent_uploads: int = 32
     upload_rate_limit_per_minute: int = 60
     client_max_objects: int = 10_000
     client_max_bytes: int = 1_099_511_627_776
@@ -129,7 +129,7 @@ class Settings:
             app_timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai"),
             max_upload_bytes=_integer("MAX_UPLOAD_BYTES", 209_715_200, 1),
             max_request_body_bytes=_integer("MAX_REQUEST_BODY_BYTES", 213_909_504, 1),
-            max_concurrent_uploads=_integer("MAX_CONCURRENT_UPLOADS", 4, 1),
+            max_concurrent_uploads=_integer("MAX_CONCURRENT_UPLOADS", 32, 1),
             upload_rate_limit_per_minute=_integer(
                 "UPLOAD_RATE_LIMIT_PER_MINUTE", 60, 1
             ),

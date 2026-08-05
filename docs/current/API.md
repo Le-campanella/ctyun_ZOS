@@ -339,17 +339,16 @@ Idempotency-Replayed: true
 | 502 | `UPLOAD_CONFIRMATION_PENDING` | 上传返回成功，但 HeadObject 暂未找到对象 | `unknown` |
 | 502 | `UPLOAD_CONFIRMATION_FAILED` | Provider 返回的对象确认结果无效或无法读取 | `unknown` |
 | 502 | `OBJECT_SIZE_MISMATCH` | HeadObject 大小与本次接收大小不一致 | `unknown` |
-| 503 | `UPLOAD_CAPACITY_EXCEEDED` | 并发上传槽位已满 | 无新任务 |
 | 503 | `STORAGE_NOT_CONFIGURED` | 显式预设没有 active 配置 | 无新任务 |
 | 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 未指定预设且默认预设不可用 | 无新任务 |
 
-限流、配额或并发容量已满时响应包含：
+限流或配额已满时响应包含：
 
 ```http
 Retry-After: 5
 ```
 
-`Retry-After` 是服务建议的等待秒数：并发容量默认返回 `5`，调用方配额当前返回 `3600`，来源限流返回当前窗口剩余秒数。调用方应按实际响应值延迟重试。
+`Retry-After` 是服务建议的等待秒数：调用方配额当前返回 `3600`，来源限流返回当前窗口剩余秒数。调用方应按实际响应值延迟重试。
 
 幂等任务处理中示例：
 
@@ -381,7 +380,7 @@ X-Client-ID: service-a
 X-Client-Key: opaque-client-secret
 ```
 
-请求使用与正式上传相同的调用方认证、来源 IP 限流、单个 `file` 字段、200 MiB 文件上限、请求体上限和并发容量。未配置 Storage Provider 时也可以调用；验证请求不创建任务，因此不消耗对象或字节配额。
+请求使用与正式上传相同的调用方认证、来源 IP 限流、单个 `file` 字段、200 MiB 文件上限、请求体上限和并发队列。未配置 Storage Provider 时也可以调用；验证请求不创建任务，因此不消耗对象或字节配额。
 
 成功响应：
 
@@ -1953,7 +1952,6 @@ Idempotency-Key: opaque-key-up-to-128-chars
 - 收到 `409 UPLOAD_IN_PROGRESS`：查询返回的 `task_id`，等待任务进入终态。
 - 收到 `409 IDEMPOTENCY_KEY_REUSED`：确认业务意图后使用新幂等键。
 - 收到 `409 IDEMPOTENCY_SCOPE_MISMATCH`：使用原预设重放，或为新的目标预设使用新幂等键。
-- 收到 `503 UPLOAD_CAPACITY_EXCEEDED`：遵循 `Retry-After`。
 - 收到 `429 UPLOAD_RATE_LIMITED` 或 `429 CLIENT_QUOTA_EXCEEDED`：遵循 `Retry-After`，不要立即重试。
 - 客户端等待响应时发生网络超时：使用相同幂等键重新请求，或先查询已知 `task_id`。
 - 未使用幂等键的自动重试会产生重复对象风险。
@@ -2000,7 +1998,6 @@ Idempotency-Key: opaque-key-up-to-128-chars
 | 502 | `STORAGE_ENDPOINT_UNREACHABLE` | 设置测试无法连接 Endpoint |
 | 502 | `STORAGE_CREDENTIALS_REJECTED` | 设置测试中的 AK/SK 被拒绝 |
 | 502 | `STORAGE_BUCKET_UNAVAILABLE` | 设置测试无法访问 Bucket |
-| 503 | `UPLOAD_CAPACITY_EXCEEDED` | 上传并发槽位已满 |
 | 503 | `STORAGE_NOT_CONFIGURED` | 显式预设尚未激活配置，或兼容设置接口没有默认配置 |
 | 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 未指定预设且没有可用默认预设 |
 | 503 | `STORAGE_CONFIG_UNAVAILABLE` | 删除任务绑定的原配置无法加载或解密 |

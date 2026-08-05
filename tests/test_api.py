@@ -1368,20 +1368,29 @@ def test_upload_requires_matching_remote_metadata(client, config, code):
     assert task["public_url"] is None
 
 
-def test_capacity_rejects_second_upload_but_queries_stay_available(client):
+def test_capacity_queues_second_upload_but_queries_stay_available(client):
     activate(client, block_upload=True)
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    second_started = Event()
+
+    def upload_second():
+        second_started.set()
+        return client.post(
+            "/v1/uploads", files={"file": ("second.bin", b"two")}
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(
             client.post, "/v1/uploads", files={"file": ("first.bin", b"one")}
         )
         assert FakeProvider.upload_started.wait(2)
-        second = client.post("/v1/uploads", files={"file": ("second.bin", b"two")})
+        second = pool.submit(upload_second)
+        assert second_started.wait(2)
+        sleep(0.1)
+        assert not second.done()
         health = client.get("/healthz")
         FakeProvider.upload_release.set()
         assert first.result(timeout=3).status_code == 201
-    assert second.status_code == 503
-    assert second.json()["error"]["code"] == "UPLOAD_CAPACITY_EXCEEDED"
-    assert second.headers["Retry-After"] == "5"
+        assert second.result(timeout=3).status_code == 201
     assert health.status_code == 200
 
 

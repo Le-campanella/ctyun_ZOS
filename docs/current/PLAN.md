@@ -170,9 +170,9 @@ spool 是否落盘由 Starlette multipart 实现决定；上传结束、校验�
 
 ### 6.3 并发限制
 
-- `MAX_CONCURRENT_UPLOADS` 默认值为 `4`。
+- `MAX_CONCURRENT_UPLOADS` 默认值为 `32`。
 - 信号量在 multipart 解析前获取，限制接收、临时写入和 ZOS 上传的完整链路。
-- 容量已满时返回 `503 UPLOAD_CAPACITY_EXCEEDED`，并带 `Retry-After` 响应头。
+- 容量已满时，请求在进程内等待上传槽位，不因并发容量返回错误。
 - 直接来源 IP 默认每分钟最多发起 `60` 次上传或接收验证，超过时返回 `429 UPLOAD_RATE_LIMITED`；不信任未经配置的代理转发头。
 - 每个调用方默认最多保有 `10000` 个可能存在的对象、总计 `1 TiB`；检查和任务插入在同一 SQLite 写事务中完成，超过时返回 `429 CLIENT_QUOTA_EXCEEDED`。
 - Dashboard、任务查询和健康检查不占用上传信号量。
@@ -978,7 +978,6 @@ MAX_CONCURRENT_UPLOADS × S3_TRANSFER_MAX_CONCURRENCY + 4
 | 502 | `STORAGE_ENDPOINT_UNREACHABLE` | 设置测试无法连接 Endpoint |
 | 502 | `STORAGE_CREDENTIALS_REJECTED` | 设置测试中的 AK/SK 被拒绝 |
 | 502 | `STORAGE_BUCKET_UNAVAILABLE` | Bucket 不存在或当前凭证不可访问 |
-| 503 | `UPLOAD_CAPACITY_EXCEEDED` | 上传并发槽位已满 |
 | 503 | `STORAGE_NOT_CONFIGURED` | 显式预设尚未激活配置 |
 | 503 | `STORAGE_DEFAULT_NOT_CONFIGURED` | 没有可用默认预设 |
 | 503 | `NOT_READY` | 就绪检查失败 |
@@ -1008,7 +1007,7 @@ BOOTSTRAP_STORAGE_FROM_ENV=true
 # 上传
 MAX_UPLOAD_BYTES=209715200
 MAX_REQUEST_BODY_BYTES=213909504
-MAX_CONCURRENT_UPLOADS=4
+MAX_CONCURRENT_UPLOADS=32
 UPLOAD_RATE_LIMIT_PER_MINUTE=60
 CLIENT_MAX_OBJECTS=10000
 CLIENT_MAX_BYTES=1099511627776
@@ -1307,7 +1306,7 @@ enable_bucket_metrics
 - [x] 增加 `ctyun_zos` provider preset、schema version、连接测试、masked 凭证和 revision 激活语义。
 - [x] Provider 或 Endpoint 变化时要求重新提交完整 AK/SK。
 - [x] 增加 `STORAGE_NOT_CONFIGURED`、`STORAGE_CONFIG_INVALID`、`STORAGE_CREDENTIALS_REQUIRED`、`CONFIG_REVISION_CONFLICT` 和设置连接错误码。
-- [x] 增加 `UPLOAD_CAPACITY_EXCEEDED`、`UPLOAD_IN_PROGRESS`、`IDEMPOTENCY_KEY_REUSED`、`TASK_NOT_FOUND` 和 `NOT_READY` 等错误码。
+- [x] 增加 `UPLOAD_IN_PROGRESS`、`IDEMPOTENCY_KEY_REUSED`、`TASK_NOT_FOUND` 和 `NOT_READY` 等错误码。
 - [x] 更新重启恢复和重试语义。
 - [x] 保留现有上传成功响应中的 `task_id`、`key` 和 `url`。
 - [x] 首次上传成功响应增加大小、Content-Type、ETag、可选 VersionId 和一次性返回的对象级 `delete_token`。

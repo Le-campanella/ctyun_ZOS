@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import math
@@ -112,7 +113,7 @@ class RequestGuardMiddleware:
     def __init__(self, app, settings: Callable[[], Settings]):
         self.app = app
         self.settings = settings
-        self.active_uploads = 0
+        self._upload_slots: asyncio.Semaphore | None = None
         # ponytail: direct LAN peers keep this map small; add a global sweep if
         # the service ever accepts high-cardinality public source addresses.
         self._upload_attempts: dict[str, deque[float]] = {}
@@ -171,6 +172,7 @@ class RequestGuardMiddleware:
             "/v1/uploads/validate",
         }
         acquired = False
+        upload_slot: asyncio.Semaphore | None = None
         if is_upload:
             client_id = _client_identity(headers, settings)
             if client_id is None:
@@ -207,20 +209,10 @@ class RequestGuardMiddleware:
                 )
                 return
             attempts.append(now)
-            if self.active_uploads >= settings.max_concurrent_uploads:
-                await self._response(
-                    scope,
-                    receive,
-                    send,
-                    503,
-                    error_body(
-                        "UPLOAD_CAPACITY_EXCEEDED", "上传并发容量已满", request_id
-                    ),
-                    request_id,
-                    {"Retry-After": "5"},
-                )
-                return
-            self.active_uploads += 1
+            if self._upload_slots is None:
+                self._upload_slots = asyncio.Semaphore(settings.max_concurrent_uploads)
+            upload_slot = self._upload_slots
+            await upload_slot.acquire()
             acquired = True
             content_length = headers.get(b"content-length")
             if content_length:
@@ -229,7 +221,8 @@ class RequestGuardMiddleware:
                 except ValueError:
                     too_large = True
                 if too_large:
-                    self.active_uploads -= 1
+                    upload_slot.release()
+                    acquired = False
                     await self._response(
                         scope,
                         receive,
@@ -274,7 +267,8 @@ class RequestGuardMiddleware:
                 )
         finally:
             if acquired:
-                self.active_uploads -= 1
+                assert upload_slot is not None
+                upload_slot.release()
 
     async def _response(
         self,
